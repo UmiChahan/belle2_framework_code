@@ -1,93 +1,266 @@
-# belle2_framework_code 
+# Belle II Analysis Framework
 
+A high-performance, multi-layered analysis framework for Belle II particle physics data processing, designed to handle billion-row datasets with optimal memory efficiency and computational performance.
 
+## 🏗️ Architecture Overview
 
-## Getting started
-
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+The framework employs a **compute-first, inverted architecture** with three distinct layers:
 
 ```
-cd existing_repo
-git remote add origin https://gitlab.desy.de/demory/belle2_framework_code.git
-git branch -M main
-git push -uf origin main
+┌─────────────────────────────────────────────────────────────────┐
+│                    Belle II Analysis Framework                   │
+│                     Compute-First Architecture                   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Layer 0: Core Protocols                      │
+│  ┌───────────────┐ ┌──────────────────┐ ┌───────────────────┐  │
+│  │ ComputeEngine │ │ DataFrameProtocol│ │ MaterializerProto │  │
+│  │ Protocol      │ │                  │ │                   │  │
+│  └───────────────┘ └──────────────────┘ └───────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────────┐
+│                   Layer 1: Compute Engines                      │
+│  ┌──────────────┐ ┌─────────────────┐ ┌──────────────────────┐ │
+│  │ LazyCompute  │ │ BillionCapable  │ │ IntegratedBillion    │ │
+│  │ Engine       │ │ Engine          │ │ CapableEngine        │ │
+│  └──────────────┘ └─────────────────┘ └──────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+┌─────────────────────────────────────────────────────────────────┐
+│                 Layer 2: Data Structures                        │
+│  ┌──────────────┐ ┌─────────────────┐ ┌──────────────────────┐ │
+│  │ UnifiedLazy  │ │ OptimizedUltra  │ │ MaterializationCtrl  │ │
+│  │ DataFrame    │ │ LazyDict        │ │                      │ │
+│  └──────────────┘ └─────────────────┘ └──────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Integrate with your tools
+### Key Architectural Principles
 
-- [ ] [Set up project integrations](https://gitlab.desy.de/demory/belle2_framework_code/-/settings/integrations)
+1. **Compute-First Design**: Computational capabilities form the foundation, not data structures
+2. **Lazy Evaluation**: Operations are deferred until materialization is required  
+3. **Memory Efficiency**: Designed to process billion-row datasets within memory constraints
+4. **Physics-Aware Optimizations**: Specialized for Belle II data patterns and analysis workflows
+5. **Zero-Breaking-Changes**: Maintains backward compatibility with existing analysis code
 
-## Collaborate with your team
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
 
-## Test and Deploy
+### Belle II Physics Optimizations  
+- **Process-Aware Loading**: Intelligent discovery and classification of Belle II analysis processes
+- **Luminosity Processing**: Specialized handling of luminosity data with process name parsing
+- **Physics Query Patterns**: Should support common Belle II analysis expressions and selections
+- **Monte Carlo Integration**: Should naturally support MC weights and process classifications
 
-Use the built-in continuous integration in GitLab.
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+## 📦 Installation
 
-***
+### Requirements
 
-# Editing this README
+```python
+# Core dependencies
+polars >= 1.0.0
+pandas >= 2.0.0
+numpy >= 1.24.0
+pyarrow >= 10.0.0
+basf2 (recent release preferable, not yet tested)
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+# Optional performance dependencies
+numba >= 0.57.0        # JIT compilation
+psutil >= 5.9.0        # Memory monitoring  
+matplotlib >= 3.6.0    # Visualization
+seaborn >= 0.12.0      # Enhanced plotting
 
-## Suggestions for a good README
+### Setup
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+```bash
+# Clone the repository
+git clone <repository-url>
+cd belle2-analysis-framework
 
-## Name
-Choose a self-explaining name for your project.
+# Install in development mode
+pip install -e .
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+# For HPC environments, configure OpenMP
+export OMP_NUM_THREADS=8
+export OMP_DYNAMIC=FALSE
+export OMP_STACKSIZE=64M
+```
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+### Multiple Access Patterns
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+The framework supports intuitive, pandas-like access patterns:
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```python
+# 1. Individual process access (standard dictionary)
+process = data['P16M16rd_mc5S_mumu_p16_v1']
+print(f"Process shape: {process.shape}")
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+# 2. Group access via dictionary key (intelligent fallback)
+mumu_group = data['mumu']  # Returns LazyGroupProxy if 'mumu' is a group
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+# 3. Group access via attribute (syntactic sugar)
+mumu_group = data.mumu
+qqbar_group = data.qqbar
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+# 4. Group access via explicit method
+mumu_group = data.group('mumu')
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+# 5. Broadcasting operations (all processes)
+filtered_all = data.query('pRecoil > 2.0')
+all_histograms = data.hist('mu1P', bins=50)
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+### Lazy Operation Chaining
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+Operations are lazy and optimized automatically:
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+```python
+# Operations execute only at terminal method call
+result = (data['mumu']
+          .query('pRecoil > 2.0')
+          .query('mu1P < 5.0') 
+          .oneCandOnly()
+          .hist('mu1Theta', bins=100))
+#         ↑ lazy    ↑ lazy    ↑ lazy    ↑ executes here
 
-## License
-For open source projects, say how it is licensed.
+# Performance analysis available
+performance_report = result.performance_report()
+for operation, metrics in performance_report.items():
+    print(f"{operation}: {metrics['mean']:.3f}s average")
+```
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+### Advanced Query Patterns
+
+The framework includes specialized query conversion for Belle II physics patterns:
+
+```python
+# Complex Belle II physics expressions are automatically optimized
+complex_selection = (
+    "mu1nCDCHits>4 & mu2nCDCHits>4 & "
+    "0.8>mu1clusterEoP & 0.8>mu2clusterEoP & "
+    "2.6179938779914944>pRecoilTheta>0.29670597283903605 & "
+    "11>totalMuonMomentum & absdPhi>1.5707963267948966"
+)
+
+# Automatically converted from pandas syntax to optimized Polars expressions
+optimized_data = data.mumu.query(complex_selection)
+```
+
+### Performance Monitoring
+
+```python
+# Enable comprehensive performance tracking
+data = load_belle2_vpho_integrated(
+    base_dir="/path/to/data",
+    enable_profiling=True,
+    performance_target_rows_per_sec=20_000_000
+)
+
+# Get detailed performance analytics
+profiling_report = data.get_profiling_report()
+print(f"Cache hit rate: {profiling_report['cache_stats']['hit_rate']:.2%}")
+print(f"Memory efficiency: {profiling_report['memory_stats']['efficiency']:.2%}")
+```
+
+## 🧪 Testing
+
+### Running Tests
+
+```python
+# Layer 1 engine tests
+from testing_suite_layer1 import run_comprehensive_tests
+run_comprehensive_tests(memory_budget_gb=16.0)
+
+# Pandas to Polars conversion tests  
+from pandas_to_polars_queries import run_test_suite
+run_test_suite()
+
+# Integration tests
+python3 -m pytest tests/ -v --tb=short
+```
+More to come ...
+## 🏆 Performance Characteristics
+
+### Benchmarked Performance TARGETS
+
+- **Processing Speed**: at least 20M+ rows/second for typical Belle II queries
+- **Memory Efficiency**: Process billion-row datasets with 16GB RAM
+- **Query Optimization**: 10-100x speedup over pandas for physics expressions
+- **Lazy Operations**: O(1) memory overhead for operation chaining
+- **Cache Efficiency**: >80% hit rates for repeated operations
+
+
+## 🔬 Architecture Deep Dive
+
+### Memory Management Strategy
+
+The framework implements a three-tier memory management approach:
+
+1. **L1 Cache**: Metadata and small results in memory
+2. **L2 Memory Pool**: Large intermediate results with smart eviction  
+3. **L3 Disk Spill**: Compressed spilling for memory pressure situations
+
+```python
+# Memory pressure triggers automatic optimization
+if memory_pressure > 0.8:
+    # Switch to streaming mode
+    engine.enable_streaming()
+    # Increase compression
+    engine.set_compression_level(9)
+    # Reduce chunk sizes
+    engine.set_chunk_size_gb(1.0)
+```
+
+## 🤝 Contributing
+
+### Development Setup
+
+```bash
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Install pre-commit hooks
+pre-commit install
+
+# Run full test suite
+python3 -m pytest tests/ --cov=belle2_framework
+```
+
+### Code Organization
+
+```
+belle2-analysis-framework/
+├── layer0/                    # Core protocols and interfaces
+├── layer1/                    # Compute engines  
+├── layer2/                    # Data structures and controllers
+├── load_processes.py         # Main loading interface
+├── pandas_to_polars_queries.py  # Query optimization
+├── tests/                    # Comprehensive test suite
+└── docs/                     # Documentation
+```
+
+### Performance Optimization Guidelines
+
+1. **Lazy First**: Default to lazy evaluation for all operations
+2. **Memory Aware**: Always consider memory implications of operations  
+3. **Physics Optimized**: Leverage Belle II data patterns for optimization
+4. **Cache Friendly**: Design operations to maximize cache utilization
+5. **Profiling Enabled**: Include performance monitoring in all critical paths
+
+## 📚 Additional Resources
+
+### Documentation
+- [Architecture Design Document](./docs/architecture.md)
+- [Performance Tuning Guide](./docs/performance.md)  
+- [Belle II Integration Guide](./docs/belle2_integration.md)
+- [API Reference](./docs/api_reference.md)
+
+## 🙏 Acknowledgments
+
+- Belle II Collaboration for physics domain expertise
+- Polars development team for high-performance DataFrame library
+- Contributors to the HEP software ecosystem
+
+---
