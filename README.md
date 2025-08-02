@@ -15,7 +15,7 @@ The framework employs a **compute-first, inverted architecture** with three dist
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Layer 0: Core Protocols                      │
 │  ┌───────────────┐ ┌──────────────────┐ ┌───────────────────┐  │
-│  │ ComputeEngine │ │ DataFrameProtocol│ │ MaterializerProto │  │
+│  │ ComputeEngine │ │ DataFrameProtocol│ │ MaterializerProtocol │  │
 │  │ Protocol      │ │                  │ │                   │  │
 │  └───────────────┘ └──────────────────┘ └───────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
@@ -73,7 +73,7 @@ matplotlib >= 3.6.0    # Visualization
 seaborn >= 0.12.0      # Enhanced plotting
 
 ### Setup
-
+```
 ```bash
 # Clone the repository
 git clone <repository-url>
