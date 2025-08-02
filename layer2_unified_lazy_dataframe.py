@@ -843,7 +843,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         return schema
     
     def _get_root_node(self) -> GraphNode:
-        """Get root node from compute capability."""
+        """Get root node from compute capability with proper fallback handling."""
         if hasattr(self._compute, 'root_node'):
             return self._compute.root_node
         else:
@@ -856,14 +856,46 @@ class UnifiedLazyDataFrame(Generic[T]):
                     metadata={'source': 'compute_capability'}
                 )
             except Exception as e:
+                # Create a proper FallbackNode that implements the full interface
                 class FallbackNode:
-                    def __init__(self):
-                        self.op_type = 'SOURCE'
+                    def __init__(self, lazy_frames=None):
+                        self.op_type = ComputeOpType.SOURCE
                         self.inputs = []
-                        self.metadata = {}
-                        self.id = 'fallback'
+                        self.metadata = {'fallback': True, 'error': str(e)}
+                        self.id = f'fallback_{id(self)}'
+                        self._lazy_frames = lazy_frames
+                        
+                        # CRITICAL FIX: Add the operation attribute
+                        self.operation = self._create_fallback_operation()
+                    
+                    def _create_fallback_operation(self):
+                        """Create a fallback operation that can materialize data."""
+                        def fallback_materialize():
+                            # Try to materialize from lazy frames if available
+                            if self._lazy_frames:
+                                try:
+                                    return pl.concat([
+                                        lf.collect(streaming=True) 
+                                        for lf in self._lazy_frames
+                                    ])
+                                except:
+                                    # If that fails, try individual collection
+                                    dfs = []
+                                    for lf in self._lazy_frames:
+                                        try:
+                                            dfs.append(lf.collect())
+                                        except:
+                                            continue
+                                    if dfs:
+                                        return pl.concat(dfs)
+                            
+                            # Last resort: return empty DataFrame
+                            return pl.DataFrame()
+                        
+                        return fallback_materialize
                 
-                return FallbackNode()
+                # Pass lazy_frames to FallbackNode for data access
+                return FallbackNode(lazy_frames=getattr(self, '_lazy_frames', None))
 
     
     def _estimate_total_rows(self) -> int:

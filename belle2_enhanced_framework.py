@@ -639,9 +639,7 @@ class EnhancedLuminosityManagerV3:
         return 'data' in process_name.lower()
     
     def _is_proc_process(self, process_name: str) -> bool:
-        """Check if process is from processed production."""
-        name_lower = process_name.lower()
-        return bool(re.search(r'_p\d+', name_lower) or 'proc' in name_lower)
+        return 'prompt' not in process_name
     
     def _get_data_luminosity(self, energy_condition: str, is_proc: bool) -> float:
         """Get appropriate data luminosity."""
@@ -1134,50 +1132,11 @@ class ParticleDataLoaderV3:
         return dict(process_files)
     
     def _apply_flat_structure_filtering(self, process_files: Dict[str, List[Path]]) -> Dict[str, List[Path]]:
-        """Apply energy condition filtering to flat structure files."""
-        energy_condition = self.config.energy_condition if self.config else '5S_scan'
-        
-        filtered = {}
-        
-        print(f"\n   🔍 Applying {energy_condition} energy filtering")
-        
-        for process_name, files in process_files.items():
-            name_lower = process_name.lower()
-            
-            # Direct pattern matching based on energy condition
-            if energy_condition == '4S_offres':
-                # Match files with 'offprompt' (off-resonance)
-                if 'offprompt' in name_lower:
-                    filtered[process_name] = files
-                    print(f"      ✓ Accepted: {process_name}")
-                else:
-                    print(f"      ✗ Filtered out: {process_name} (not offprompt)")
-                    
-            elif energy_condition == '4S_on':
-                # Match files with 'prompt' but NOT 'offprompt' (on-resonance)
-                if 'prompt' in name_lower and 'offprompt' not in name_lower:
-                    filtered[process_name] = files
-                    print(f"      ✓ Accepted: {process_name}")
-                else:
-                    print(f"      ✗ Filtered out: {process_name} (not on-resonance prompt)")
-                    
-            elif energy_condition == '5S_scan':
-                # For 5S scan, accept files WITHOUT prompt/offprompt
-                if 'prompt' not in name_lower:
-                    filtered[process_name] = files
-                    print(f"      ✓ Accepted: {process_name}")
-                else:
-                    print(f"      ✗ Filtered out: {process_name} (has prompt/offprompt)")
-            
-            else:
-                # Unknown condition - accept all
-                filtered[process_name] = files
-                print(f"      ✓ Accepted: {process_name} (unknown condition)")
-        
-        print(f"\n   📊 Filtering result: {len(filtered)}/{len(process_files)} processes kept")
-        
-        return filtered
-            
+        e = self.config.energy_condition
+        return {n:f for n,f in process_files.items() if
+                (e=='4S_on' and not any(x in n for x in ['off','5s','scan'])) or
+                (e=='4S_offres' and 'off' in n) or
+                (e=='5S_scan' and any(x in n for x in ['5s','scan']))} or process_files       
     def _load_flat_files_as_processes(self,
                                      process_files: Dict[str, List[Path]],
                                      columns: Optional[List[str]],
