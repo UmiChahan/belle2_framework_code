@@ -1021,23 +1021,16 @@ class LazyComputeEngine(ComputeEngine):
     
     def _estimate_lazyframe_size(self, lf: pl.LazyFrame) -> int:
         """Estimate LazyFrame size using sampling."""
+        # Modern Polars metadata extraction - zero data materialization
         try:
-            # Sample first 1000 rows
-            sample = lf.head(1000).collect()
-            sample_rows = len(sample)
-            
-            if sample_rows == 0:
-                return 0
-                
-            # Estimate total rows (this is a heuristic)
-            # In practice, you might have metadata about file sizes
-            estimated_total = sample_rows * 1000  # Assume sample is representative
-            
-            return estimated_total
-            
-        except Exception:
-            # Conservative estimate if sampling fails
-            return 1_000_000
+            return lf.select(pl.count()).collect().item()  # Direct count - single int
+        except:
+            # Schema-based fallback (instant)
+            try:
+                n_cols = len(lf.collect_schema())
+                return max(25_000, n_cols * 2_000)  # Belle II-aware scaling
+            except:
+                return 50_000  # Conservative Belle II default
     
     def _execute_graph(self, node: GraphNode, estimated_size: int) -> Any:
         """Execute computation graph with optimization and adaptive memory tracking."""

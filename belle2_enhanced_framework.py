@@ -118,7 +118,7 @@ class WeightedDataFrame:
             if not hasattr(WeightedDataFrame, '_global_histogram_engine'):
                 WeightedDataFrame._global_histogram_engine = OptimizedStreamingHistogram()
             return WeightedDataFrame._global_histogram_engine
-        return None
+        return None 
     
     def hist(self, column: str, bins: int = 50, 
              range: Optional[Tuple[float, float]] = None,
@@ -143,11 +143,47 @@ class WeightedDataFrame:
         new_df = self._dataframe.query(expr)
         return WeightedDataFrame(new_df, self._weight, self._histogram_engine)
     
+
     def oneCandOnly(self, *args, **kwargs) -> 'WeightedDataFrame':
-        """Select one candidate with weight preservation."""
+        """Select one candidate with weight preservation and estimation tracking."""
+        # Execute transformation
         new_df = self._dataframe.oneCandOnly(*args, **kwargs)
-        return WeightedDataFrame(new_df, self._weight, self._histogram_engine)
+        
+        # Create result with preserved weight and engine
+        result = WeightedDataFrame(new_df, self._weight, self._histogram_engine)
+        
+        # Log estimation change if available (non-invasive)
+        if hasattr(self._dataframe, '_estimated_rows') and hasattr(new_df, '_estimated_rows'):
+            before = self._dataframe._estimated_rows
+            after = new_df._estimated_rows
+            if before and after and after != before:
+                print(f"   📊 {self._weight.process_name if self._weight else 'Process'}: "
+                      f"{before:,} → {after:,} rows (oneCandOnly)")
+        
+        return result
     
+    def __getattr__(self, name):
+        """Enhanced delegation for framework properties."""
+        # Priority list for direct delegation
+        framework_properties = {
+            '_estimated_rows', '_transformation_chain', '_schema',
+            '_metadata', '_compute_graph', '_operation_cache'
+        }
+        
+        if name in framework_properties:
+            return getattr(self._dataframe, name, None)
+        
+        # Standard delegation
+        return getattr(self._dataframe, name)
+    
+    def __setattr__(self, name, value):
+        """Bidirectional property synchronization."""
+        if name.startswith('_') and name not in ['_dataframe', '_weight', '_histogram_engine']:
+            # Framework properties go to underlying dataframe
+            if hasattr(self, '_dataframe') and hasattr(self._dataframe, name):
+                setattr(self._dataframe, name, value)
+        
+        super().__setattr__(name, value)
     def createDeltaColumns(self) -> 'WeightedDataFrame':
         """Create delta columns with weight preservation."""
         new_df = self._dataframe.createDeltaColumns()

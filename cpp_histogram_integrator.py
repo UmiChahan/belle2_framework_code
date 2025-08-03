@@ -486,7 +486,115 @@ void compute_histogram_scalar(
     }
 }
 
-} // extern "C"
+}
+// ===== WEIGHTED HISTOGRAM SUPPORT =====
+
+// AVX2 Weighted Histogram Implementation
+void compute_weighted_histogram_avx2(
+    const double* __restrict__ data,
+    const double* __restrict__ weights,
+    size_t n,
+    double min_val,
+    double max_val,
+    size_t num_bins,
+    double* __restrict__ output
+) {
+    const double scale = num_bins / (max_val - min_val);
+    const __m256d v_min = _mm256_set1_pd(min_val);
+    const __m256d v_scale = _mm256_set1_pd(scale);
+    const __m256d v_max_bin = _mm256_set1_pd(num_bins - 1);
+    const __m256d v_zero = _mm256_setzero_pd();
+    
+    std::fill(output, output + num_bins, 0.0);
+    
+    #pragma omp parallel
+    {
+        std::vector<double> local_hist(num_bins, 0.0);
+        
+        #pragma omp for schedule(static) nowait
+        for (size_t i = 0; i < n; i += 4) {
+            if (i + 64 < n) {
+                _mm_prefetch((const char*)&data[i + 64], _MM_HINT_T0);
+                _mm_prefetch((const char*)&weights[i + 64], _MM_HINT_T0);
+            }
+            
+            __m256d values = _mm256_loadu_pd(&data[i]);
+            __m256d weight_vals = _mm256_loadu_pd(&weights[i]);
+            
+            __m256d nan_mask_data = _mm256_cmp_pd(values, values, _CMP_ORD_Q);
+            __m256d nan_mask_weights = _mm256_cmp_pd(weight_vals, weight_vals, _CMP_ORD_Q);
+            __m256d valid_mask = _mm256_and_pd(nan_mask_data, nan_mask_weights);
+            
+            __m256d normalized = _mm256_sub_pd(values, v_min);
+            __m256d bin_indices = _mm256_mul_pd(normalized, v_scale);
+            bin_indices = _mm256_max_pd(bin_indices, v_zero);
+            bin_indices = _mm256_min_pd(bin_indices, v_max_bin);
+            
+            weight_vals = _mm256_and_pd(weight_vals, valid_mask);
+            
+            __m128i indices = _mm256_cvtpd_epi32(bin_indices);
+            alignas(16) int32_t idx[4];
+            _mm_store_si128((__m128i*)idx, indices);
+            
+            alignas(32) double w[4];
+            _mm256_store_pd(w, weight_vals);
+            
+            for (int j = 0; j < 4 && i + j < n; ++j) {
+                if (w[j] != 0.0) {
+                    local_hist[idx[j]] += w[j];
+                }
+            }
+        }
+        
+        #pragma omp critical
+        {
+            #pragma omp simd aligned(output, local_hist: 32)
+            for (size_t i = 0; i < num_bins; ++i) {
+                output[i] += local_hist[i];
+            }
+        }
+    }
+}
+
+// Scalar Weighted Histogram Fallback
+void compute_weighted_histogram_scalar(
+    const double* data,
+    const double* weights,
+    size_t n,
+    double min_val,
+    double max_val,
+    size_t num_bins,
+    double* output
+) {
+    std::fill(output, output + num_bins, 0.0);
+    const double scale = num_bins / (max_val - min_val);
+    
+    #pragma omp parallel
+    {
+        std::vector<double> local_hist(num_bins, 0.0);
+        
+        #pragma omp for schedule(guided)
+        for (size_t i = 0; i < n; ++i) {
+            double val = data[i];
+            double weight = weights[i];
+            
+            if (!std::isnan(val) && !std::isnan(weight) && 
+                val >= min_val && val <= max_val && weight > 0) {
+                
+                size_t bin = static_cast<size_t>((val - min_val) * scale);
+                if (bin >= num_bins) bin = num_bins - 1;
+                local_hist[bin] += weight;
+            }
+        }
+        
+        #pragma omp critical
+        {
+            for (size_t i = 0; i < num_bins; ++i) {
+                output[i] += local_hist[i];
+            }
+        }
+    }
+}// extern "C"
 '''
         
         try:
@@ -511,6 +619,7 @@ void compute_histogram_scalar(
     def _setup_function_signatures(self, lib):
         """Setup function signatures for C library."""
         try:
+            
             # Enhanced AVX2 function
             lib.compute_histogram_avx2_enhanced.argtypes = [
                 ctypes.POINTER(ctypes.c_double),
@@ -532,6 +641,29 @@ void compute_histogram_scalar(
                 ctypes.POINTER(ctypes.c_size_t)
             ]
             lib.compute_histogram_scalar.restype = None
+            if hasattr(lib, 'compute_weighted_histogram_avx2'):
+                lib.compute_weighted_histogram_avx2.argtypes = [
+                    ctypes.POINTER(ctypes.c_double),  # data
+                    ctypes.POINTER(ctypes.c_double),  # weights
+                    ctypes.c_size_t,                  # n
+                    ctypes.c_double,                  # min_val
+                    ctypes.c_double,                  # max_val
+                    ctypes.c_size_t,                  # num_bins
+                    ctypes.POINTER(ctypes.c_double)   # output
+                ]
+            lib.compute_weighted_histogram_avx2.restype = None
+    
+            if hasattr(lib, 'compute_weighted_histogram_scalar'):
+                lib.compute_weighted_histogram_scalar.argtypes = [
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.POINTER(ctypes.c_double),
+                    ctypes.c_size_t,
+                    ctypes.c_double,
+                    ctypes.c_double,
+                    ctypes.c_size_t,
+                    ctypes.POINTER(ctypes.c_double)
+                ]
+                lib.compute_weighted_histogram_scalar.restype = None
             
         except AttributeError as e:
             print(f"⚠️ Some C++ functions not available: {e}")

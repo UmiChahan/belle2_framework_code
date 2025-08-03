@@ -5,17 +5,7 @@ Layer 0: Core Protocols and Interfaces
 Foundational protocols for the compute-first architecture. This layer defines
 the theoretical foundation where computation is the primary abstraction.
 
-Design Philosophy:
-- Computation as first-class citizen, not capability of data structures
-- Protocol-based design for maximum flexibility
-- Type-safe interfaces with generic support
-- Lazy evaluation semantics throughout
-- Memory-aware compute contracts
-
-Theoretical Foundation:
-- Based on category theory's F-algebras where computations form morphisms
-- Follows principle of referential transparency
-- Implements lazy evaluation as core semantic
+CRITICAL FIX: Added missing SOURCE operation type to ComputeOpType enum
 """
 
 from __future__ import annotations
@@ -35,11 +25,12 @@ TInput = TypeVar('TInput')
 TOutput = TypeVar('TOutput')
 
 # ============================================================================
-# CORE OPERATION TYPES
+# CORE OPERATION TYPES - FIXED
 # ============================================================================
 
 class ComputeOpType(Enum):
     """Enumeration of fundamental compute operation types."""
+    SOURCE = auto()       # CRITICAL FIX: Added missing SOURCE type
     MAP = auto()          # Element-wise transformation
     FILTER = auto()       # Predicate-based selection
     REDUCE = auto()       # Aggregation operation
@@ -159,69 +150,65 @@ class OperationComposer(Protocol):
     Enables operation fusion and optimization before execution.
     """
     
-    def compose_operations(self, ops: List[Callable]) -> Callable:
-        """Compose multiple operations into single operation."""
+    def compose(self, operations: List[Callable]) -> Callable:
+        """Compose multiple operations into optimized single operation."""
         ...
     
     def can_fuse(self, op1: Callable, op2: Callable) -> bool:
         """Check if two operations can be fused."""
         ...
     
-    def fuse_operations(self, op1: Callable, op2: Callable) -> Callable:
-        """Fuse two compatible operations."""
+    def optimize_composition(self, operations: List[Callable]) -> List[Callable]:
+        """Optimize sequence of operations."""
         ...
 
 
 @runtime_checkable
 class ComputeOptimizer(Protocol):
     """
-    Protocol for compute graph optimization.
+    Protocol for computation optimization.
     
-    Responsible for optimizing computation graphs before execution.
+    Handles graph optimization, operation reordering, and resource allocation.
     """
     
     def optimize_graph(self, graph: Any) -> Any:
         """Optimize computation graph."""
         ...
     
-    def eliminate_redundancy(self, graph: Any) -> Any:
-        """Eliminate redundant computations."""
+    def estimate_cost(self, operation: Callable) -> float:
+        """Estimate computational cost of operation."""
         ...
     
-    def reorder_operations(self, graph: Any) -> Any:
-        """Reorder operations for efficiency."""
+    def reorder_operations(self, operations: List[Callable]) -> List[Callable]:
+        """Reorder operations for optimal execution."""
         ...
 
 
 @runtime_checkable
 class Materializer(Protocol):
     """
-    Protocol for materializing compute capabilities into concrete formats.
+    Protocol for materializing compute capabilities into concrete results.
     
-    Handles conversion from compute abstractions to concrete data structures.
+    Handles the transition from lazy computation graphs to actual data.
     """
     
-    def to_numpy(self, capability: ComputeCapability) -> np.ndarray:
-        """Materialize as NumPy array."""
+    def materialize(self, capability: ComputeCapability) -> Any:
+        """Convert compute capability to concrete result."""
         ...
     
-    def to_polars(self, capability: ComputeCapability) -> Any:
-        """Materialize as Polars DataFrame."""
+    def can_materialize(self, capability: ComputeCapability) -> bool:
+        """Check if capability can be materialized."""
         ...
     
-    def to_dict(self, capability: ComputeCapability) -> Dict[str, Any]:
-        """Materialize as dictionary."""
-        ...
-    
-    def to_format(self, capability: ComputeCapability, format_type: str) -> Any:
-        """Materialize to specified format."""
+    def estimate_materialization_cost(self, capability: ComputeCapability) -> float:
+        """Estimate cost of materialization."""
         ...
 
 
 @runtime_checkable
 class ComputeContract(Protocol):
     """
-    Protocol defining contracts for compute operations.
+    Protocol defining compute contracts.
     
     Specifies requirements, guarantees, and constraints for computations.
     """
@@ -313,6 +300,7 @@ class ComputeNode:
     def estimate_computational_cost(self) -> float:
         """Estimate relative computational cost."""
         base_costs = {
+            ComputeOpType.SOURCE: 0.1,      # Minimal cost for data sources
             ComputeOpType.MAP: 1.0,
             ComputeOpType.FILTER: 1.2,
             ComputeOpType.REDUCE: 2.0,
@@ -321,24 +309,20 @@ class ComputeNode:
             ComputeOpType.AGGREGATE: 2.5,
             ComputeOpType.WINDOW: 3.5,
             ComputeOpType.TRANSFORM: 2.0,
-            ComputeOpType.MATERIALIZE: 1.0,
-            ComputeOpType.PARTITION: 1.5,
-            ComputeOpType.COLLECT: 1.0,
-            ComputeOpType.BROADCAST: 2.0,
+            ComputeOpType.MATERIALIZE: 1.5,
+            ComputeOpType.PARTITION: 1.8,
+            ComputeOpType.COLLECT: 1.3,
+            ComputeOpType.BROADCAST: 2.2,
             ComputeOpType.CUSTOM: 3.0
         }
         
         base_cost = base_costs.get(self.op_type, 1.0)
         
-        # Add costs from dependencies
-        dependency_cost = sum(
-            node.estimate_computational_cost() 
-            for node in self.inputs
-        )
+        # Add cost from dependencies
+        dependency_cost = sum(dep.estimate_computational_cost() 
+                            for dep in self.inputs)
         
         return base_cost + dependency_cost
-
-
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================

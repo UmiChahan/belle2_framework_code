@@ -269,59 +269,196 @@ class OptimizedStreamingHistogram:
         
         return hist_counts, total_processed
     
-    def compute_blazing_fast(self, lazy_frames: List[pl.LazyFrame], column: str, 
-                           bins: int = 50, range: Optional[Tuple[float, float]] = None,
-                           density: bool = False) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Compute histogram with automatic algorithm selection and resource management.
-        
-        This is the main entry point that ensures stable execution on HPC systems.
-        """
-        start_time = time.time()
-        
-        # Estimate dataset size and characteristics
-        dataset_stats = self._analyze_dataset(lazy_frames, column)
-        
-        # Get range efficiently
-        if range is None:
-            range = self._estimate_range_adaptive(lazy_frames, column, dataset_stats)
-        
-        min_val, max_val = range
-        
-        # Select optimal algorithm based on size AND available resources
-        algorithm = self._select_algorithm_safe(dataset_stats, bins)
-        
-        print(f"🎯 Algorithm: {algorithm} for {dataset_stats['estimated_rows']:,} rows")
-        
-        # Execute with selected algorithm
-        if algorithm == 'chunked_cpp' or algorithm == 'parallel_cpp':
-            # Use our safe parallel implementation
-            hist_counts, total_processed = self._compute_parallel_cpp_safe(
-                lazy_frames, column, bins, min_val, max_val
+    def compute_blazing_fast(self, lazy_frames: List[pl.LazyFrame], column: str,
+                               bins: int = 50, range: Optional[Tuple[float, float]] = None,
+                               density: bool = False, weights: Optional[str] = None
+                               ) -> Tuple[np.ndarray, np.ndarray]:
+            """
+            Enhanced histogram computation with transparent weight support.
+            
+            Key improvements:
+            - Automatic weight detection and routing
+            - Zero overhead for unweighted case
+            - Seamless C++ acceleration for both paths
+            """
+            
+            # Range detection (existing code)
+            if range is None:
+                range_min = float('inf')
+                range_max = float('-inf')
+                
+                for lf in lazy_frames:
+                    stats = lf.select([
+                        pl.col(column).min().alias('min'),
+                        pl.col(column).max().alias('max')
+                    ]).collect()
+                    
+                    range_min = min(range_min, stats['min'][0])
+                    range_max = max(range_max, stats['max'][0])
+                
+                epsilon = (range_max - range_min) * 1e-10
+                range = (range_min - epsilon, range_max + epsilon)
+            
+            # Enhanced C++ path selection
+            if self._cpp_available and bins <= 10000:
+                try:
+                    # WEIGHTED PATH
+                    if weights:
+                        print(f"   Using C++ accelerated weighted histogram")
+                        
+                        # Efficient data collection
+                        all_data = []
+                        all_weights = []
+                        
+                        for lf in lazy_frames:
+                            # Collect both columns in single pass
+                            chunk = lf.select([column, weights]).collect()
+                            
+                            # Extract arrays
+                            data_array = chunk[column].to_numpy()
+                            weight_array = chunk[weights].to_numpy()
+                            
+                            # Pre-filter NaN values
+                            valid_mask = ~(np.isnan(data_array) | np.isnan(weight_array))
+                            
+                            if np.any(valid_mask):
+                                all_data.append(data_array[valid_mask])
+                                all_weights.append(weight_array[valid_mask])
+                        
+                        if not all_data:
+                            # No valid data
+                            return np.zeros(bins), np.linspace(range[0], range[1], bins + 1)
+                        
+                        # Concatenate chunks
+                        data_concat = np.concatenate(all_data)
+                        weights_concat = np.concatenate(all_weights)
+                        
+                        # Ensure contiguous memory layout
+                        if not data_concat.flags['C_CONTIGUOUS']:
+                            data_concat = np.ascontiguousarray(data_concat, dtype=np.float64)
+                        if not weights_concat.flags['C_CONTIGUOUS']:
+                            weights_concat = np.ascontiguousarray(weights_concat, dtype=np.float64)
+                        
+                        # Allocate output
+                        output = np.zeros(bins, dtype=np.float64)
+                        
+                        # Select best weighted implementation
+                        if hasattr(self.cpp_integrator.lib, 'compute_weighted_histogram_avx2') and len(data_concat) > 5000:
+                            self.cpp_integrator.lib.compute_weighted_histogram_avx2(
+                                data_concat.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                                weights_concat.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                                len(data_concat),
+                                range[0],
+                                range[1],
+                                bins,
+                                output.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+                            )
+                        else:
+                            self.cpp_integrator.lib.compute_weighted_histogram_scalar(
+                                data_concat.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                                weights_concat.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                                len(data_concat),
+                                range[0],
+                                range[1],
+                                bins,
+                                output.ctypes.data_as(ctypes.POINTER(ctypes.c_double))
+                            )
+                        
+                        counts = output
+                    
+                    # UNWEIGHTED PATH (existing, optimized)
+                    else:
+                        print(f"   Using C++ accelerated histogram")
+                        
+                        # Existing unweighted implementation
+                        all_data = []
+                        for lf in lazy_frames:
+                            chunk = lf.select(column).collect()
+                            data_array = chunk[column].to_numpy()
+                            valid_data = data_array[~np.isnan(data_array)]
+                            if len(valid_data) > 0:
+                                all_data.append(valid_data)
+                        
+                        if not all_data:
+                            return np.zeros(bins), np.linspace(range[0], range[1], bins + 1)
+                        
+                        data_concat = np.concatenate(all_data)
+                        
+                        if not data_concat.flags['C_CONTIGUOUS']:
+                            data_concat = np.ascontiguousarray(data_concat, dtype=np.float64)
+                        
+                        output = np.zeros(bins, dtype=np.uint64)
+                        
+                        # Use existing functions
+                        self.cpp_integrator.lib.compute_histogram_avx2_enhanced(
+                            data_concat.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                            len(data_concat),
+                            range[0],
+                            range[1],
+                            bins,
+                            output.ctypes.data_as(ctypes.POINTER(ctypes.c_size_t))
+                        )
+                        
+                        counts = output.astype(np.float64)
+                    
+                    # Generate edges
+                    edges = np.linspace(range[0], range[1], bins + 1)
+                    
+                    # Apply density normalization if requested
+                    if density:
+                        bin_widths = np.diff(edges)
+                        counts = counts / (counts.sum() * bin_widths)
+                    
+                    return counts, edges
+                    
+                except Exception as e:
+                    print(f"⚠️ C++ histogram failed: {e}, falling back to Polars")
+            
+            # POLARS FALLBACK (existing implementation)
+            print("   Using Polars histogram implementation")
+            
+            if weights:
+                # Weighted Polars path
+                all_data = []
+                all_weights = []
+                
+                for lf in lazy_frames:
+                    chunk = lf.select([column, weights]).collect()
+                    all_data.append(chunk[column])
+                    all_weights.append(chunk[weights])
+                
+                col_data = pl.concat(all_data)
+                weight_data = pl.concat(all_weights)
+                
+                np_data = col_data.to_numpy()
+                np_weights = weight_data.to_numpy()
+                
+                valid_mask = ~(np.isnan(np_data) | np.isnan(np_weights))
+                np_data = np_data[valid_mask]
+                np_weights = np_weights[valid_mask]
+                
+            else:
+                # Unweighted Polars path
+                col_data = pl.concat([
+                    lf.select(column).collect()
+                    for lf in lazy_frames
+                ])[column]
+                
+                np_data = col_data.to_numpy()
+                np_data = np_data[~np.isnan(np_data)]
+                np_weights = None
+            
+            # NumPy histogram (supports weights natively)
+            counts, edges = np.histogram(
+                np_data,
+                bins=bins,
+                range=range,
+                density=density,
+                weights=np_weights
             )
-        else:
-            # For small datasets, use direct approach
-            hist_counts, total_processed = self._compute_direct_cpp_safe(
-                lazy_frames, column, bins, min_val, max_val
-            )
+            
+            return counts, edges
         
-        # Handle density normalization
-        if density and total_processed > 0:
-            bin_width = (max_val - min_val) / bins
-            hist_counts = hist_counts.astype(float) / (total_processed * bin_width)
-        
-        # Create edges
-        bin_edges = np.linspace(min_val, max_val, bins + 1)
-        
-        # Performance reporting
-        elapsed = time.time() - start_time
-        throughput = total_processed / elapsed if elapsed > 0 else 0
-        
-        print(f"⚡ Histogram complete: {total_processed:,} rows in {elapsed:.2f}s "
-              f"({throughput/1e6:.1f}M rows/s)")
-        
-        return hist_counts, bin_edges
-    
     def _select_algorithm_safe(self, dataset_stats: Dict[str, Any], bins: int) -> str:
         """Select algorithm based on dataset size AND system resources."""
         rows = dataset_stats['estimated_rows']

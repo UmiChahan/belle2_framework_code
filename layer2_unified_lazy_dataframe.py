@@ -295,7 +295,7 @@ class UnifiedLazyDataFrame(Generic[T]):
             self._estimated_rows = 0
         else:
             self._schema = schema or {'test_col': 'Float64', 'value': 'Int64', 'pRecoil': 'Float64', 'M_bc': 'Float64'}
-            self._estimated_rows = 1000  # Default
+            # self._estimated_rows = 1000  # Default
         
         self._metadata = metadata or {}
         
@@ -305,8 +305,8 @@ class UnifiedLazyDataFrame(Generic[T]):
             self._lazy_frames = None
             if not self._is_empty and hasattr(compute, 'schema') and compute.schema:
                 self._schema.update(compute.schema)
-            if hasattr(compute, 'estimated_size'):
-                self._estimated_rows = compute.estimated_size if not self._is_empty else 0
+            # if hasattr(compute, 'estimated_size'):
+            #     self._estimated_rows = compute.estimated_size if not self._is_empty else 0
         elif lazy_frames is not None and lazy_frames:
             self._lazy_frames = lazy_frames
             if not self._is_empty:
@@ -333,6 +333,7 @@ class UnifiedLazyDataFrame(Generic[T]):
             else:
                 # This is a derived DataFrame, don't add redundant init
                 self._transformation_metadata = None
+        self._estimated_rows = self._estimate_total_rows()
 
     def schema(self):
         if self._schema_cache is None:
@@ -458,21 +459,15 @@ class UnifiedLazyDataFrame(Generic[T]):
                 transform_copy = copy.deepcopy(transform)
                 parent_lineage.append(transform_copy)
         
-        # Use provided schema or inherit from parent
+        # Use provided schema or inherit
         if new_schema is None:
             new_schema = self._schema.copy() if self._schema else {}
         
-        # CRITICAL: Respect required_columns constraint if provided
+        # Respect required_columns constraint
         required_cols = kwargs.get('required_columns', self.required_columns.copy())
         
-        # If required_columns are specified, ensure schema matches
-        if required_cols and new_schema:
-            # Filter schema to only include required columns
-            filtered_schema = {col: dtype for col, dtype in new_schema.items() 
-                            if col in required_cols}
-            new_schema = filtered_schema
-        
-        result = UnifiedLazyDataFrame(
+        # Create NEW instance (not recursive call!)
+        result = UnifiedLazyDataFrame(  # ← CORRECT: New instance creation
             compute=new_compute,
             schema=new_schema,
             metadata=copy.deepcopy(self._metadata) if self._metadata else {},
@@ -496,16 +491,6 @@ class UnifiedLazyDataFrame(Generic[T]):
             result._transformation_chain.add_transformation(transformation_metadata)
         
         return result
-    # CRITICAL: Update ALL transformation methods to use parent_chain
-    def __getattr__(self, name):
-        """Handle test framework attribute injection."""
-        if name == 'CUSTOM':
-            # Return None for test framework compatibility
-            return None
-        # Default behavior
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
-
-
 
     def filter(self, *predicates) -> 'UnifiedLazyDataFrame':
         """Filter with chain preservation."""
@@ -1159,13 +1144,24 @@ class UnifiedLazyDataFrame(Generic[T]):
             return 0.9  # Conservative estimate
     
     def oneCandOnly(self, group_cols=None, sort_col=None, ascending=False) -> 'UnifiedLazyDataFrame':
-        """Best candidate selection with proper Polars column handling."""
+        """Best candidate selection with proper Polars column handling and estimation."""
         group_cols = group_cols or ['__event__', '__run__', '__experiment__']
         sort_col = sort_col or 'random'
         
+        # Calculate expected result size using physics knowledge
+        current_rows = self._estimated_rows
+        expected_rows = max(100, int(current_rows * 0.1))  # ~10% for single candidate/event
+        
+        print(f"   🔬 oneCandOnly: {current_rows:,} → ~{expected_rows:,} rows (expected)")
+        
         transform_meta = TransformationMetadata(
             operation='dataframe_oneCandOnly',
-            parameters={'group_cols': group_cols, 'sort_col': sort_col, 'ascending': ascending}
+            parameters={
+                'group_cols': group_cols, 
+                'sort_col': sort_col, 
+                'ascending': ascending,
+                'expected_rows': expected_rows  # Store for propagation
+            }
         )
         
         def one_cand_operation(df):
@@ -1193,13 +1189,19 @@ class UnifiedLazyDataFrame(Generic[T]):
             metadata={'operation': 'one_candidate_only', 'group_cols': group_cols}
         )
         
-        estimated_groups = max(1, int(self._estimated_rows * 0.1))
-        new_compute = self._create_compute_capability(one_cand_node, estimated_groups)
+        new_compute = self._create_compute_capability(one_cand_node, expected_rows)
         
-        return self._create_derived_dataframe(
+        result = self._create_derived_dataframe(
             new_compute=new_compute,
             transformation_metadata=transform_meta
         )
+        
+        # Force correct estimation
+        result._estimated_rows = expected_rows
+        if hasattr(result, '_operation_cache'):
+            result._operation_cache.clear()
+        
+        return result
     
     def _estimate_group_count(self, group_cols: List[str]) -> int:
         """Estimate number of unique groups."""
@@ -1355,56 +1357,85 @@ class UnifiedLazyDataFrame(Generic[T]):
     # ============================================================================
     
     def _select_optimal_histogram_strategy(self, column: str, bins: int, 
-                                         weights: Optional[str]) -> HistogramExecutionStrategy:
+                                             weights: Optional[str]) -> 'HistogramExecutionStrategy':
         """
         Intelligent strategy selection based on data characteristics and system state.
         
-        Decision tree:
-        1. Check if C++ acceleration is viable (rows > 100k, bins < 10k, engine available)
-        2. Check if billion-row engine needed (rows > 10M or memory constrained)
-        3. Default to lazy chunked for medium datasets
-        4. Use memory constrained for high memory pressure
-        5. Fallback for edge cases
+        Enhanced with transformation awareness and cache invalidation.
         """
+        # Handle WeightedDataFrame context
+        actual_df = self
+        if hasattr(self, '_dataframe') and hasattr(self._dataframe, '_estimated_rows'):
+            actual_df = self._dataframe
+        
+        # Force cache invalidation for fresh estimation
+        if hasattr(actual_df, '_operation_cache'):
+            actual_df._operation_cache.clear()
         
         # Get system state
         memory_available_gb = psutil.virtual_memory().available / 1024**3
-        memory_pressure = memory_available_gb < self.memory_budget_gb * 0.3
+        memory_budget = getattr(actual_df, 'memory_budget_gb', 4.0)
+        memory_pressure = memory_available_gb < memory_budget * 0.3
         
-        # Check previous performance history if available
-        if hasattr(self, '_histogram_performance_history'):
-            best_previous = self._get_best_previous_strategy(column)
+        # Check performance history
+        if hasattr(actual_df, '_histogram_performance_history'):
+            best_previous = actual_df._get_best_previous_strategy(column)
             if best_previous:
                 return best_previous
         
-        # C++ acceleration check
-        if (self._estimated_rows > 100_000 and 
-            bins < 10_000 and 
-            not weights and  # C++ doesn't support weights yet
-            hasattr(self, '_histogram_engine') and 
-            self._histogram_engine is not None):
+        # Calculate fresh row estimation with transformation awareness
+        fresh_rows = actual_df._estimated_rows
+        complexity = 1.0
+        
+        if hasattr(actual_df, '_transformation_chain'):
+            chain = actual_df._transformation_chain.get_lineage()
             
-            # Verify C++ engine is actually functional
-            if self._test_cpp_engine():
+            # Physics-aware reduction calculation
+            for transform in chain:
+                op = getattr(transform, 'operation', '')
+                if op == 'dataframe_oneCandOnly':
+                    fresh_rows = int(fresh_rows * 0.1)
+                elif op == 'query':
+                    selectivity = getattr(transform, 'parameters', {}).get('selectivity', 0.5)
+                    fresh_rows = int(fresh_rows * selectivity)
+                elif op == 'aggregate':
+                    fresh_rows = min(fresh_rows, 1000)
+                else:
+                    fresh_rows = int(fresh_rows * 0.9)
+            
+            fresh_rows = max(100, fresh_rows)
+            complexity = 1.2 ** len(chain)
+        
+        # Update estimation
+        actual_df._estimated_rows = fresh_rows
+        
+        # Strategy decision tree with physics-aware thresholds
+        
+        # C++ acceleration check
+        if (fresh_rows > 100_000 and bins < 10_000 and not weights and 
+            complexity < 2.0 and hasattr(actual_df, '_histogram_engine') and 
+            actual_df._histogram_engine is not None):
+            if actual_df._test_cpp_engine():
                 return HistogramExecutionStrategy.CPP_ACCELERATED
         
         # Billion-row engine check
-        if self._estimated_rows > 10_000_000 or memory_pressure:
-            # Check if Layer 1 billion engine is available
-            if self._check_billion_row_capability():
+        billion_threshold = 10_000_000 / complexity
+        if fresh_rows > billion_threshold or memory_pressure:
+            if actual_df._check_billion_row_capability():
                 return HistogramExecutionStrategy.BILLION_ROW_ENGINE
+            elif memory_pressure:
+                return HistogramExecutionStrategy.MEMORY_CONSTRAINED
         
-        # Memory constrained check
-        if memory_available_gb < 2.0 or self._estimated_rows * 8 * 4 > memory_available_gb * 1024**3:
+        # Memory constraint check
+        estimated_memory_gb = (fresh_rows * 8 * 4 * complexity) / (1024**3)
+        if memory_available_gb < 2.0 or estimated_memory_gb > memory_available_gb * 0.5:
             return HistogramExecutionStrategy.MEMORY_CONSTRAINED
         
-        # Default to lazy chunked for everything else
-        if self._estimated_rows > 10_000:
+        # Size-based selection
+        if fresh_rows > 10_000 / complexity:
             return HistogramExecutionStrategy.LAZY_CHUNKED
         
-        # Small datasets can use basic approach
         return HistogramExecutionStrategy.FALLBACK_BASIC
-    
     # ============================================================================
     # EXECUTION STRATEGIES
     # ============================================================================
@@ -1794,10 +1825,8 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Physics-aware defaults (highest priority)
         physics_ranges = {
-            'M_bc': (5.20, 5.30), 'Mbc': (5.20, 5.30),
-            'delta_E': (-0.30, 0.30), 'deltaE': (-0.30, 0.30),
             'pRecoil': (0.1, 6.0),
-            'mu1P': (0.0, 3.0), 'mu2P': (0.0, 3.0),
+            'mu1P': (0.0, 5.0), 'mu2P': (0.0, 5.0),
             'mu1Pt': (0.0, 3.0), 'mu2Pt': (0.0, 3.0),
         }
         
@@ -2169,6 +2198,41 @@ class UnifiedLazyDataFrame(Generic[T]):
             'memory_budget_gb': self.memory_budget_gb
         }
 
+_original_create_derived_dataframe = UnifiedLazyDataFrame._create_derived_dataframe
+
+def _create_derived_dataframe_with_estimation(self, new_compute, new_schema=None,
+                                            transformation_metadata=None, **kwargs):
+    """Enhanced wrapper with estimation propagation."""
+    # Call original implementation
+    result = _original_create_derived_dataframe(
+        self, new_compute, new_schema, transformation_metadata, **kwargs
+    )
+    
+    # Add estimation based on transformation type
+    if transformation_metadata and hasattr(result, '_estimated_rows'):
+        op = transformation_metadata.operation
+        params = transformation_metadata.parameters
+        
+        # Physics-informed selectivity
+        if op == 'dataframe_oneCandOnly':
+            # Use stored expectation or default
+            result._estimated_rows = params.get('expected_rows', 
+                                               max(100, int(self._estimated_rows * 0.1)))
+        elif op == 'query':
+            selectivity = params.get('selectivity', 0.5)
+            result._estimated_rows = max(100, int(self._estimated_rows * selectivity))
+        elif op == 'aggregate':
+            groups = params.get('estimated_groups', 1000)
+            result._estimated_rows = min(groups, self._estimated_rows)
+        
+        # Clear stale cache
+        if hasattr(result, '_operation_cache'):
+            result._operation_cache.clear()
+    
+    return result
+
+# Replace the method
+UnifiedLazyDataFrame._create_derived_dataframe = _create_derived_dataframe_with_estimation
 
 # ============================================================================
 # LazyColumnAccessor Implementation
