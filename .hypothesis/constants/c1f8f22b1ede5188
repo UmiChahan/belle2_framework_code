@@ -1,4 +1,0 @@
-# file: /gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_project/conftest.py
-# hypothesis_version: 6.136.4
-
-[1.0, 1.8, 2.0, 2.1, 2.2, 2.5, 3.0, 4.0, 5.0, 5.278, 5.279, 5.28, 5.281, 8.0, 1000, 1000000, 'Float64', 'Int64', 'M_bc', 'SOURCE', 'all', 'ee', 'engine', 'estimated_size', 'mock_node_1', 'mumu', 'pRecoil', 'qqbar', 'root_node', 'schema', 'test_col', 'test_ee_process', 'test_mumu_process', 'test_qqbar_process', 'unittest.mock', 'value']

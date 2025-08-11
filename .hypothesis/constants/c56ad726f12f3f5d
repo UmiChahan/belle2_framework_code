@@ -1,4 +1,0 @@
-# file: /gpfs/group/belle2/users2022/kyldem/photoneff_updated/cpp_histogram_integrator.py
-# hypothesis_version: 6.136.4
-
-[0.1, 100, 1000000000, '(\\d+)\\.(\\d+)', '--version', '-Wall', '-Wextra', '-Wno-sign-compare', '-fPIC', '-ffast-math', '-fopenmp', '-g', '-lstdc++', '-march=native', '-mavx2', '-o', '-shared', '-std=c++17', '.', '.belle2_cache', '.cpp', '.dll', '.so', '/LD', '/MD', '/arch:AVX2', '/openmp', '/tmp', '=', 'C_CONTIGUOUS', 'Microsoft', 'O3', 'TEMP', 'Windows', '_', '__main__', 'avx', 'avx2', 'cl', 'clang', 'clang++', 'command', 'cpp_accelerated', 'flags', 'fma', 'g++', 'msvc', 'numpy', 'priority', 'source_path', 'sse2', 'sse4_1', 'supports_avx2', 'supports_openmp', 'version', 'w']

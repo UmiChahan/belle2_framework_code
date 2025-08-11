@@ -1,6 +1,9 @@
 # Python test artifacts
 .hypothesis/
 .pytest_cache/
+analysis_mu1P/
+analysis_mu2P/
+analysis_pRecoil/
 
 # Python bytecode
 __pycache__/
@@ -9,3 +12,6 @@ __pycache__/
 # Virtual envs (adjust to your name)
 .venv/
 venv/
+
+#pdf files
+*.pdf
