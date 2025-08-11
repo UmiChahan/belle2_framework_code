@@ -1,0 +1,4 @@
+# file: /gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_project/layer2_complete_integration.py
+# hypothesis_version: 6.136.4
+
+[0.0, 0.001, 0.003, 0.8, 5.279, 8.0, 16.0, 100, 1000, 1024, '### Materialization', '*.parquet', '.belle2_cache', 'A', 'BroadcastResult', 'LazyColumnAccessor', 'LazyGroupBy', 'LazyGroupProxy', 'M_bc', 'MemoryAwareExecutor', 'PerformanceProfiler', 'UnifiedLazyDataFrame', '__main__', 'amplitude', 'auto', 'cache_efficiency', 'chi2', 'collect', 'cpp_acceleration', 'csv', 'events', 'fit', 'framework_stats', 'gaussian', 'graph_optimization', 'group_preference', 'hist', 'histogram', 'layer2_optimizers', 'materialization', 'memory_budget_gb', 'model', 'mu', 'ndof', 'numpy', 'operations_executed', 'optimization_report', 'parameters', 'parquet', 'performance', 'print_layer2_info', 'quick_analysis', 'recommendations', 'report', 'sigma', 'to_pandas', 'total_rows_processed', 'uncertainties', '✅ Cuts applied']

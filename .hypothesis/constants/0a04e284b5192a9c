@@ -1,0 +1,4 @@
+# file: /gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_project/layer0.py
+# hypothesis_version: 6.136.4
+
+[0.25, 0.5, 0.75, 1.5, 10000, 'ColumnAccessor', 'ColumnAccessor[bool]', 'ComputeCapability[T]', 'ComputeNode', 'DataFrameProtocol', 'ExecutionPlan', 'ExpandingGroupBy', 'RollingGroupBy', 'RollingWindow', 'T', 'TColumn', 'TIndex', 'TResult', 'TransformProtocol', '_left', '_right', 'auto', 'average', 'broadcast', 'columnar', 'fancy', 'forward', 'inner', 'integer', 'keep', 'label', 'last', 'linear', 'mask', 'mean', 'metadata', 'numexpr', 'outer', 'pandas', 'quicksort', 'random', 'sequential', 'slice', 'value', 'variable']

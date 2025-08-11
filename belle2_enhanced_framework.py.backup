@@ -1,0 +1,3407 @@
+"""
+Belle II Production Framework - Enhanced Edition with Luminosity Weighting
+========================================================================
+
+Integrated framework with proper data/MC luminosity weighting for accurate comparisons.
+
+Key Integration:
+- EnhancedLuminosityManager seamlessly integrated
+- Automatic weight calculation based on process names and energy conditions
+- Weights properly propagated through all analysis stages
+- Minimal changes to existing logic
+
+Author: Enhanced for production use with luminosity weighting
+Version: 2.1.0
+"""
+
+import numpy as np
+import polars as pl
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union, Any, Iterator, Callable, TypeVar
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+import time
+import gc
+import warnings
+import weakref
+from contextlib import contextmanager
+import threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+import functools
+import inspect
+from enum import Enum, auto
+import re  # Added for proc/prompt detection
+import pickle
+import hashlib
+import shutil
+import os
+from datetime import datetime, timedelta
+
+# Layer2 imports
+from layer2_optimized_ultra_lazy_dict import OptimizedUltraLazyDict, BroadcastResult
+from layer2_unified_lazy_dataframe import UnifiedLazyDataFrame, TransformationMetadata
+from layer2_complete_integration import Belle2Layer2Framework, layer2_optimizers
+from layer2_materialization_controller import (
+    MaterializationHints, MaterializationFormat, 
+    PerformanceProfiler, GraphOptimizationEngine, ExecutionPlan
+)
+
+T = TypeVar('T')
+class SystemCharacteristics:
+    """Comprehensive system profiling for adaptive optimization"""
+    
+    def __init__(self, cpu_cores: int, memory_gb: float, cache_mb: float, storage_type: str):
+        self.cpu_cores = cpu_cores
+        self.memory_gb = memory_gb
+        self.cache_mb = cache_mb
+        self.storage_type = storage_type
+    
+    @classmethod
+    def detect(cls) -> 'SystemCharacteristics':
+        """Intelligent system detection with robust fallbacks"""
+        try:
+            import psutil
+            import platform
+            
+            # CPU detection
+            cpu_cores = psutil.cpu_count(logical=False) or 4
+            
+            # Memory detection
+            memory_info = psutil.virtual_memory()
+            memory_gb = memory_info.total / (1024**3)
+            
+            # Cache estimation (architecture-dependent)
+            cache_mb = cls._estimate_l3_cache(cpu_cores)
+            
+            # Storage type detection
+            storage_type = cls._detect_storage_type()
+            
+            return cls(cpu_cores, memory_gb, cache_mb, storage_type)
+            
+        except ImportError:
+            # Fallback for systems without psutil
+            return cls._create_conservative_fallback()
+    
+    @staticmethod
+    def _estimate_l3_cache(cpu_cores: int) -> float:
+        """Intelligent L3 cache estimation"""
+        # Modern CPU cache sizing heuristics
+        if cpu_cores <= 4:
+            return 8.0    # 8MB typical for quad-core
+        elif cpu_cores <= 8:
+            return 16.0   # 16MB for higher-end CPUs
+        else:
+            return 32.0   # 32MB+ for server-class CPUs
+    
+    @staticmethod
+    def _detect_storage_type() -> str:
+        """Storage technology detection"""
+        try:
+            import platform
+            system = platform.system().lower()
+            
+            # Simple heuristics - can be enhanced
+            if 'linux' in system:
+                # Check for NVMe indicators
+                try:
+                    with open('/proc/mounts', 'r') as f:
+                        mounts = f.read()
+                    if 'nvme' in mounts:
+                        return 'nvme'
+                except:
+                    pass
+                return 'ssd'  # Assume SSD for modern Linux
+            else:
+                return 'ssd'  # Conservative assumption
+                
+        except:
+            return 'ssd'  # Safe default
+    
+    @classmethod
+    def _create_conservative_fallback(cls) -> 'SystemCharacteristics':
+        """Conservative system assumptions when detection fails"""
+        return cls(
+            cpu_cores=4,      # Conservative CPU assumption
+            memory_gb=16.0,   # Conservative memory assumption  
+            cache_mb=12.0,    # Conservative cache assumption
+            storage_type='ssd' # Conservative storage assumption
+        )
+
+class PerformanceHistory:
+    """Adaptive learning for chunk size optimization"""
+    
+    def __init__(self):
+        self.performance_data = {}  # chunk_size -> [throughput_samples]
+        self.optimal_cache = {}     # size_range -> optimal_chunk_size
+    
+    def record(self, chunk_size: int, throughput: float):
+        """Record performance measurement"""
+        if chunk_size not in self.performance_data:
+            self.performance_data[chunk_size] = []
+        
+        self.performance_data[chunk_size].append(throughput)
+        
+        # Maintain rolling window of last 10 measurements
+        if len(self.performance_data[chunk_size]) > 10:
+            self.performance_data[chunk_size] = self.performance_data[chunk_size][-10:]
+    
+    def get_optimal_chunk_size(self, base_size: int) -> int:
+        """Retrieve historically optimal chunk size"""
+        # Find best performing similar-sized chunks
+        best_throughput = 0
+        best_size = base_size
+        
+        for chunk_size, throughputs in self.performance_data.items():
+            if throughputs:  # Ensure we have data
+                avg_throughput = sum(throughputs) / len(throughputs)
+                if avg_throughput > best_throughput:
+                    best_throughput = avg_throughput
+                    best_size = chunk_size
+        
+        return best_size
+# ============================================================================
+# LUMINOSITY MANAGER - INTEGRATED FROM paste.txt
+# ============================================================================
+
+class EnhancedLuminosityManager:
+    """
+    ⚖️ Production luminosity manager with real Belle II luminosity values.
+    
+    Handles proc/prompt distinction and comprehensive error handling.
+    """
+    
+    def __init__(self):
+        # Real Belle II luminosity values in fb^-1
+        self.lumi_proc = {
+            'data_proc': {
+                '4S_on': 357.30651809174,
+                '4S_offres': 41.64267813217,
+                '5S_scan': 19.63477002990
+            },
+            'uubar': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'ddbar': {
+                '4S_on': 1429.2255,
+                '4S_offres': 168.4762,
+                '5S_scan': 78.5391
+            },
+            'ssbar': {
+                '4S_on': 1429.2255,
+                '4S_offres': 168.4762,
+                '5S_scan': 78.5391
+            },
+            'ccbar': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'taupair': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'mumu': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'gg': {
+                '4S_on': 684.2325,
+                '4S_offres': 79.2034,
+                '5S_scan': 39.2695
+            },
+            'ee': {
+                '4S_on': 34.2116,
+                '4S_offres': 3.9602,
+                '5S_scan': 1.9635
+            },
+            'eeee': {
+                '4S_on': 341.6712,
+                '4S_offres': 38.7110,
+                '5S_scan': 19.6348
+            },
+            'eemumu': {
+                '4S_on': 342.1162,
+                '4S_offres': 38.7110,
+                '5S_scan': 19.6348
+            },
+            'llXX': {
+                '4S_on': 874.7212,
+                '4S_offres': 114.0483,
+                '5S_scan': 19.6348
+            },
+            'hhISR': {
+                '4S_on': 357.3065,
+                '4S_offres': 42.1190,
+                '5S_scan': 19.6348
+            }
+        }
+        
+        self.lumi_prompt = {
+            'data_prompt': {
+                '4S_on': 129.52826011600,
+                '4S_offres': 17.67914933099,
+                '5S_scan': 0.0
+            },
+            'uubar': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'ddbar': {
+                '4S_on': 1429.2255,
+                '4S_offres': 168.4762,
+                '5S_scan': 78.5391
+            },
+            'ssbar': {
+                '4S_on': 1429.2255,
+                '4S_offres': 168.4762,
+                '5S_scan': 78.5391
+            },
+            'ccbar': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'taupair': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'mumu': {
+                '4S_on': 1368.4666,
+                '4S_offres': 158.4068,
+                '5S_scan': 78.5391
+            },
+            'gg': {
+                '4S_on': 684.2325,
+                '4S_offres': 79.2034,
+                '5S_scan': 39.2695
+            },
+            'ee': {
+                '4S_on': 34.2116,
+                '4S_offres': 3.9602,
+                '5S_scan': 1.9635
+            },
+            'eeee': {
+                '4S_on': 341.6712,
+                '4S_offres': 38.7110,
+                '5S_scan': 19.6348
+            },
+            'eemumu': {
+                '4S_on': 342.1162,
+                '4S_offres': 38.7110,
+                '5S_scan': 19.6348
+            },
+            'llXX': {
+                '4S_on': 874.7212,
+                '4S_offres': 114.0483,
+                '5S_scan': 19.6348
+            },
+            'hhISR': {
+                '4S_on': 357.3065,
+                '4S_offres': 42.1190,
+                '5S_scan': 19.6348
+            }
+        }
+        
+        # Merged view for backwards compatibility
+        self.luminosities = {
+            energy: {
+                **{k: v[energy] for k, v in self.lumi_proc.items() if energy in v},
+                **{k: v[energy] for k, v in self.lumi_prompt.items() if energy in v}
+            }
+            for energy in ['4S_on', '4S_offres', '5S_scan']
+        }
+        
+        self.process_classification_patterns = {
+            'mumu': ['mumu', 'mu+mu-', 'muon'],
+            'ee': ['ee', 'e+e-', 'electron', 'bhabha'],
+            'taupair': ['taupair', 'tau', 'tautau'],
+            'uubar': ['uubar', 'uu'], 'ddbar': ['ddbar', 'dd'], 'ssbar': ['ssbar', 'ss'],
+            'ccbar': ['ccbar', 'cc'], 'gg': ['gg', 'gamma', 'photon'],
+            'hhISR': ['hhisr', 'hh_isr', 'hadron_isr', 'hh'],
+            'eeee': ['eeee', '4e'], 'eemumu': ['eemumu', '2e2mu'],
+            'llXX': ['llxx', 'llyy', 'four_lepton'],
+            'charged': ['charged', 'b+b-', 'bplus'], 'mixed': ['mixed', 'b0b0bar', 'bneutral']
+        }
+    
+    def calculate_weights_robust(self, processes: Dict[str, List[str]], 
+                               energy_condition: str) -> Tuple[Dict, Dict]:
+        """
+        Calculate luminosity weights with proc/prompt awareness and comprehensive error handling.
+        
+        Returns:
+            Tuple of (weights_dict, diagnostics_dict)
+        """
+        print(f"⚖️  Calculating robust luminosity weights for {energy_condition}")
+        print("=" * 70)
+        
+        weights = {}
+        diagnostics = {}
+        
+        # Validate energy condition
+        if energy_condition not in ['4S_on', '4S_offres', '5S_scan']:
+            print(f"   ⚠️  WARNING: Unknown energy condition '{energy_condition}', defaulting to '5S_scan'")
+            energy_condition = '5S_scan'
+        
+        for group_name, process_list in processes.items():
+            if group_name == 'data':
+                # Data processes get weight = 1.0
+                weights[group_name] = {name: 1.0 for name in process_list}
+                continue
+                
+            weights[group_name] = {}
+            group_diagnostics = []
+            
+            for process_name in process_list:
+                try:
+                    # Determine if this is proc or prompt data/MC
+                    is_proc = self._is_proc_process(process_name)
+                    is_data = self._is_data_process(process_name)
+                    
+                    # Get appropriate luminosity database
+                    if is_data:
+                        # Data: use proc or prompt data luminosity
+                        data_key = 'data_proc' if is_proc else 'data_prompt'
+                        lumi_db = self.lumi_proc if is_proc else self.lumi_prompt
+                        data_lumi = lumi_db.get(data_key, {}).get(energy_condition, 0.0)
+                        
+                        # Special handling for prompt 5S_scan (no data)
+                        if not is_proc and energy_condition == '5S_scan' and data_lumi == 0.0:
+                            print(f"   ℹ️  No prompt data for {energy_condition}, skipping {process_name}")
+                            weights[group_name][process_name] = 0.0
+                            group_diagnostics.append({
+                                'process': process_name,
+                                'data_type': 'prompt',
+                                'energy': energy_condition,
+                                'weight': 0.0,
+                                'method': 'no_prompt_data'
+                            })
+                            continue
+                    else:
+                        # MC: determine data luminosity to use
+                        data_lumi = self._get_data_luminosity(energy_condition, is_proc)
+                        
+                        # Extract process type
+                        process_type = self._extract_process_type_robust(process_name)
+                        
+                        # Get MC luminosity (same for proc and prompt)
+                        lumi_db = self.lumi_proc if is_proc else self.lumi_prompt
+                        mc_lumi = lumi_db.get(process_type, {}).get(energy_condition, None)
+                        
+                        # Fallback logic
+                        if mc_lumi is None or mc_lumi <= 0:
+                            # Try the other database as fallback
+                            alt_db = self.lumi_prompt if is_proc else self.lumi_proc
+                            mc_lumi = alt_db.get(process_type, {}).get(energy_condition, 1000.0)
+                            method = 'cross_database_fallback'
+                        else:
+                            method = f'{"proc" if is_proc else "prompt"}_lookup'
+                        
+                        # Calculate weight
+                        if mc_lumi > 0 and np.isfinite(mc_lumi):
+                            weight = data_lumi / mc_lumi
+                        else:
+                            weight = 1.0
+                            method = 'fallback_unity'
+                        
+                        # Sanity check
+                        if not np.isfinite(weight) or weight <= 0 or weight > 1000:
+                            print(f"   ⚠️  WARNING: Suspicious weight {weight:.6f} for {process_name}")
+                            weight = 1.0
+                            method = 'sanity_fallback'
+                        
+                        weights[group_name][process_name] = weight
+                        
+                        group_diagnostics.append({
+                            'process': process_name,
+                            'process_type': process_type,
+                            'is_proc': is_proc,
+                            'data_luminosity': data_lumi,
+                            'mc_luminosity': mc_lumi,
+                            'weight': weight,
+                            'method': method
+                        })
+                        
+                        print(f"{process_name:<35} {process_type:<10} {'proc' if is_proc else 'prompt':<6} "
+                              f"{mc_lumi:>8.2f} {weight:>8.4f} {method}")
+                    
+                except Exception as e:
+                    # Critical error handling
+                    print(f"   ❌ ERROR calculating weight for {process_name}: {e}")
+                    weights[group_name][process_name] = 1.0  # Safe fallback
+                    group_diagnostics.append({
+                        'process': process_name,
+                        'error': str(e),
+                        'weight': 1.0,
+                        'method': 'error_fallback'
+                    })
+            
+            diagnostics[group_name] = group_diagnostics
+        
+        print("=" * 70)
+        self._print_weight_summary(weights)
+        return weights, diagnostics
+    
+    def _is_proc_process(self, process_name: str) -> bool:
+        """Determine if process is from processed (proc) production."""
+        name_lower = process_name.lower()
+        # Look for proc indicators: p## pattern or explicit 'proc'
+        return bool(re.search(r'_p\d+', name_lower) or 'proc' in name_lower)
+    
+    def _is_data_process(self, process_name: str) -> bool:
+        """Determine if process is data."""
+        return 'data' in process_name.lower()
+    
+    def _get_data_luminosity(self, energy_condition: str, is_proc: bool) -> float:
+        """Get appropriate data luminosity for MC weighting."""
+        if is_proc:
+            return self.lumi_proc.get('data_proc', {}).get(energy_condition, 19.6348)
+        else:
+            # For prompt MC, use prompt data if available, otherwise proc data
+            prompt_lumi = self.lumi_prompt.get('data_prompt', {}).get(energy_condition, 0.0)
+            if prompt_lumi > 0:
+                return prompt_lumi
+            else:
+                # Fallback to proc data for prompt MC if no prompt data exists
+                return self.lumi_proc.get('data_proc', {}).get(energy_condition, 19.6348)
+    
+    def _extract_process_type_robust(self, process_name: str) -> str:
+        """Enhanced process type extraction with multiple fallback strategies."""
+        name_lower = process_name.lower()
+        
+        # Primary pattern matching
+        for process_type, patterns in self.process_classification_patterns.items():
+            if any(pattern in name_lower for pattern in patterns):
+                return process_type
+        
+        # Heuristic fallbacks
+        fallback_patterns = [
+            (['continuum', 'cont'], 'uubar'),
+            (['quark', 'qqbar', 'hadron'], 'ccbar'),
+            (['lepton', 'lep'], 'mumu'),
+            (['photon', 'gamma'], 'gg'),
+            (['tau'], 'taupair'),
+            (['electron'], 'ee')
+        ]
+        
+        for patterns, process_type in fallback_patterns:
+            if any(pattern in name_lower for pattern in patterns):
+                return process_type
+        
+        return 'default'
+    
+    def _print_weight_summary(self, weights: Dict):
+        """Print comprehensive weight statistics."""
+        print(f"📊 Weight Summary by Group:")
+        for group, proc_weights in weights.items():
+            if proc_weights:
+                weight_values = list(proc_weights.values())
+                print(f"   {group:10s}: μ={np.mean(weight_values):7.4f}, "
+                      f"σ={np.std(weight_values):7.4f}, "
+                      f"range=[{min(weight_values):.4f}, {max(weight_values):.4f}], "
+                      f"n={len(weight_values)}")
+
+# ============================================================================
+# HIERARCHICAL CACHING SYSTEM
+# ============================================================================
+
+@dataclass
+class CacheEntry:
+    """Metadata for cached process data."""
+    process_name: str
+    timestamp: datetime
+    size_bytes: int
+    access_count: int = 0
+    last_access: datetime = field(default_factory=datetime.now)
+    
+    def update_access(self):
+        """Update access statistics."""
+        self.access_count += 1
+        self.last_access = datetime.now()
+
+class HierarchicalCache:
+    """
+    Multi-level caching system for Belle II data processing.
+    
+    Levels:
+    - L1: In-memory cache (fastest, limited size)
+    - L2: Disk cache (larger capacity, persistent)
+    - Smart eviction based on LRU and access patterns
+    """
+    
+    def __init__(self, 
+                 memory_cache_gb: float = 2.0,
+                 disk_cache_dir: Optional[Path] = None,
+                 cache_ttl_hours: int = 24):
+        
+        # Memory cache configuration
+        self.memory_cache_gb = memory_cache_gb
+        self.memory_cache = {}
+        self.memory_usage = 0
+        self._memory_lock = threading.RLock()
+        
+        # Disk cache configuration
+        self.disk_cache_dir = disk_cache_dir or Path.home() / '.belle2_cache' / 'hierarchical'
+        self.disk_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_ttl = timedelta(hours=cache_ttl_hours)
+        
+        # Metadata tracking
+        self.cache_metadata = {}
+        self._metadata_lock = threading.Lock()
+        
+        # Initialize disk cache cleanup
+        self._cleanup_disk_cache()
+        
+        print(f"🗄️ Hierarchical cache initialized:")
+        print(f"   L1 Memory: {memory_cache_gb:.1f} GB")
+        print(f"   L2 Disk: {self.disk_cache_dir}")
+    
+    def get(self, process_name: str, 
+            loader_func: Optional[Callable] = None) -> Optional[Any]:
+        """
+        Retrieve from cache with hierarchical lookup.
+        
+        Args:
+            process_name: Process identifier
+            loader_func: Function to load data if not cached
+            
+        Returns:
+            Cached data or None
+        """
+        # L1: Memory cache
+        with self._memory_lock:
+            if process_name in self.memory_cache:
+                self._update_metadata(process_name)
+                print(f"   💾 L1 hit: {process_name}")
+                return self.memory_cache[process_name]
+        
+        # L2: Disk cache
+        disk_data = self._load_from_disk(process_name)
+        if disk_data is not None:
+            print(f"   💿 L2 hit: {process_name}")
+            # Promote to memory cache
+            self._add_to_memory_cache(process_name, disk_data)
+            return disk_data
+        
+        # Cache miss - load if loader provided
+        if loader_func:
+            print(f"   🔄 Cache miss: {process_name} - loading...")
+            data = loader_func()
+            if data is not None:
+                self.put(process_name, data)
+            return data
+        
+        return None
+    
+    def put(self, process_name: str, data: Any):
+        """Store in hierarchical cache with intelligent placement."""
+        # Estimate size
+        size_bytes = self._estimate_size(data)
+        
+        # Create metadata
+        metadata = CacheEntry(
+            process_name=process_name,
+            timestamp=datetime.now(),
+            size_bytes=size_bytes
+        )
+        
+        # Determine cache placement
+        if size_bytes < self.memory_cache_gb * 1e9 * 0.1:  # < 10% of memory budget
+            self._add_to_memory_cache(process_name, data, metadata)
+        
+        # Always save to disk for persistence
+        self._save_to_disk(process_name, data, metadata)
+    
+    def _add_to_memory_cache(self, process_name: str, data: Any, 
+                            metadata: Optional[CacheEntry] = None):
+        """Add to memory cache with LRU eviction."""
+        with self._memory_lock:
+            # Estimate size if not provided
+            if metadata is None:
+                size_bytes = self._estimate_size(data)
+                metadata = CacheEntry(process_name, datetime.now(), size_bytes)
+            else:
+                size_bytes = metadata.size_bytes
+            
+            # Check if eviction needed
+            budget_bytes = self.memory_cache_gb * 1e9
+            while (self.memory_usage + size_bytes > budget_bytes and 
+                   len(self.memory_cache) > 0):
+                self._evict_from_memory()
+            
+            # Add to cache
+            self.memory_cache[process_name] = data
+            self.memory_usage += size_bytes
+            
+            with self._metadata_lock:
+                self.cache_metadata[process_name] = metadata
+    
+    def _evict_from_memory(self):
+        """Evict least recently used entry from memory."""
+        if not self.memory_cache:
+            return
+        
+        # Find LRU entry
+        lru_process = min(
+            self.cache_metadata.keys(),
+            key=lambda k: self.cache_metadata[k].last_access
+            if k in self.memory_cache else datetime.max
+        )
+        
+        # Remove from memory (stays on disk)
+        if lru_process in self.memory_cache:
+            data = self.memory_cache.pop(lru_process)
+            self.memory_usage -= self.cache_metadata[lru_process].size_bytes
+            print(f"   🔄 Evicted from L1: {lru_process}")
+    
+    def _save_to_disk(self, process_name: str, data: Any, metadata: CacheEntry):
+        """Save to disk cache with compression."""
+        cache_file = self.disk_cache_dir / f"{process_name}.cache"
+        meta_file = self.disk_cache_dir / f"{process_name}.meta"
+        
+        try:
+            # Save data (using pickle for flexibility)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            # Save metadata
+            with open(meta_file, 'wb') as f:
+                pickle.dump(metadata, f)
+            
+            with self._metadata_lock:
+                self.cache_metadata[process_name] = metadata
+                
+        except Exception as e:
+            warnings.warn(f"Failed to save to disk cache: {e}")
+    
+    def _load_from_disk(self, process_name: str) -> Optional[Any]:
+        """Load from disk cache if available and valid."""
+        cache_file = self.disk_cache_dir / f"{process_name}.cache"
+        meta_file = self.disk_cache_dir / f"{process_name}.meta"
+        
+        if not (cache_file.exists() and meta_file.exists()):
+            return None
+        
+        try:
+            # Load metadata
+            with open(meta_file, 'rb') as f:
+                metadata = pickle.load(f)
+            
+            # Check TTL
+            if datetime.now() - metadata.timestamp > self.cache_ttl:
+                print(f"   ⏰ Cache expired: {process_name}")
+                cache_file.unlink()
+                meta_file.unlink()
+                return None
+            
+            # Load data
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+            
+            # Update metadata
+            metadata.update_access()
+            self._save_to_disk(process_name, data, metadata)
+            
+            return data
+            
+        except Exception as e:
+            warnings.warn(f"Failed to load from disk cache: {e}")
+            return None
+    
+    def _cleanup_disk_cache(self):
+        """Remove expired entries from disk cache."""
+        cleaned = 0
+        for meta_file in self.disk_cache_dir.glob("*.meta"):
+            try:
+                with open(meta_file, 'rb') as f:
+                    metadata = pickle.load(f)
+                
+                if datetime.now() - metadata.timestamp > self.cache_ttl:
+                    cache_file = meta_file.with_suffix('.cache')
+                    meta_file.unlink()
+                    if cache_file.exists():
+                        cache_file.unlink()
+                    cleaned += 1
+                    
+            except Exception:
+                pass
+        
+        if cleaned > 0:
+            print(f"   🧹 Cleaned {cleaned} expired cache entries")
+    
+    def _estimate_size(self, data: Any) -> int:
+        """Estimate object size in bytes."""
+        try:
+            # For DataFrames with estimated size method
+            if hasattr(data, 'estimated_size'):
+                return data.estimated_size()
+            # For objects with memory usage info
+            elif hasattr(data, 'memory_usage'):
+                return data.memory_usage(deep=True).sum()
+            # Fallback to pickle size estimation
+            else:
+                return len(pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL))
+        except Exception:
+            return 1_000_000  # 1MB default
+    
+    def _update_metadata(self, process_name: str):
+        """Update access metadata."""
+        with self._metadata_lock:
+            if process_name in self.cache_metadata:
+                self.cache_metadata[process_name].update_access()
+    
+    def clear(self):
+        """Clear all cache levels."""
+        with self._memory_lock:
+            self.memory_cache.clear()
+            self.memory_usage = 0
+        
+        # Clear disk cache
+        for file in self.disk_cache_dir.glob("*"):
+            file.unlink()
+        
+        with self._metadata_lock:
+            self.cache_metadata.clear()
+        
+        print("   🗑️ Cache cleared")
+    
+    def stats(self) -> Dict[str, Any]:
+        """Get cache statistics."""
+        with self._memory_lock:
+            memory_entries = len(self.memory_cache)
+            memory_usage_gb = self.memory_usage / 1e9
+        
+        disk_entries = len(list(self.disk_cache_dir.glob("*.cache")))
+        
+        return {
+            'memory_entries': memory_entries,
+            'memory_usage_gb': memory_usage_gb,
+            'memory_capacity_gb': self.memory_cache_gb,
+            'disk_entries': disk_entries,
+            'total_entries': len(self.cache_metadata)
+        }
+
+VPHO_KEYS = [
+    '__experiment__', '__run__', '__event__', '__production__', '__candidate__', '__ncandidates__',
+    'pRecoilTheta', 'pRecoilPhi', 'eRecoil', 'pRecoil', 'mRecoil', 'm2Recoil',
+    'mu1clusterE', 'mu2clusterE', 'mu1clusterEoP', 'mu2clusterEoP',
+    'mu1clusterPhi', 'mu2clusterPhi', 'mu1clusterTheta', 'mu2clusterTheta',
+    'mu1nCDCHits', 'mu2nCDCHits', 'nGammaROE', 'nTracksROE',
+    'nPhotonCands', 'nTracks', 'sumE_offcone', 'sumE_offcone_barrel',
+    'totalMuonMomentum', 'theta', 'phi', 'E', 'beamE',
+    'vpho_px', 'vpho_py', 'vpho_pz', 'vpho_E', 'psnm_ffo',
+    'mu1Theta', 'mu2Theta', 'mu1Phi', 'mu2Phi', 'mu1E', 'mu2E', 'mu1P', 'mu2P'
+]
+
+GAMMA_KEYS = [
+    '__experiment__', '__run__', '__event__', '__production__', '__candidate__', '__ncandidates__',
+    '__eventType__', '__weight__', 'mcMatchWeight', 'mcPDG', 'theta', 'phi', 'E',
+    'useCMSFrame__bophi__bc', 'useCMSFrame__botheta__bc', 'useCMSFrame__boE__bc',
+    'nGammaROE', 'minC2TDist', 'clusterTiming', 'clusterErrorTiming'
+]
+
+# Default keys by particle type
+DEFAULT_KEYS_BY_PARTICLE = {
+    'vpho': VPHO_KEYS,
+    'gamma': GAMMA_KEYS,
+    'photon': GAMMA_KEYS,  # Alias
+    'electron': None,  # Use all columns
+    'muon': None,      # Use all columns
+}
+
+# ============================================================================
+# CONFIGURATION SYSTEM
+# ============================================================================
+@dataclass
+class LoadingTask:
+    """Serializable loading task for parallel execution."""
+    process_name: str
+    files: List[Path]
+    columns: Optional[List[str]]
+    sample_fraction: Optional[float]
+    memory_budget: float
+    particle_type: str
+
+class ParallelDirectoryLoader:
+    """
+    High-performance parallel loading system for Belle II directory structures.
+    
+    Features:
+    - Process-level parallelization for I/O isolation
+    - Intelligent work distribution
+    - Integrated caching support
+    - Robust error recovery
+    """
+    
+    def __init__(self, 
+                 max_workers: Optional[int] = None,
+                 cache: Optional[HierarchicalCache] = None):
+        
+        self.max_workers = max_workers or min(8, (os.cpu_count() or 4))
+        self.cache = cache
+        self._loading_stats = defaultdict(float)
+        
+        print(f"⚡ Parallel loader initialized with {self.max_workers} workers")
+    
+    def load_directories_parallel(self,
+                            process_directories: Dict[str, List[Path]],
+                            columns: Optional[List[str]],
+                            sample_fraction: Optional[float],
+                            memory_budget_gb: float,
+                            particle_type: str) -> OptimizedUltraLazyDict:
+        """Load multiple directories in parallel with caching support."""
+        start_time = time.time()
+        
+        # CRITICAL INSTRUMENTATION POINT 1
+        print(f"\n[PARALLEL-COORDINATOR] Initiating parallel load", flush=True)
+        print(f"[PARALLEL-COORDINATOR] Process directories: {len(process_directories)}", flush=True)
+        print(f"[PARALLEL-COORDINATOR] First 3 processes: {list(process_directories.keys())[:3]}", flush=True)
+        
+        # Prepare process allocation
+        process_sizes = {
+            name: sum(f.stat().st_size for f in files)
+            for name, files in process_directories.items()
+        }
+        
+        # CRITICAL INSTRUMENTATION POINT 2
+        print(f"[PARALLEL-COORDINATOR] Process sizes calculated", flush=True)
+        for name, size in list(process_sizes.items())[:3]:
+            print(f"  {name}: {size/1e9:.2f} GB", flush=True)
+        
+        # Adaptive memory allocation
+        memory_allocations = self._calculate_memory_allocations(
+            process_sizes, memory_budget_gb
+        )
+        
+        # CRITICAL INSTRUMENTATION POINT 3
+        print(f"[PARALLEL-COORDINATOR] Memory allocations computed", flush=True)
+        
+        # Create result container
+        processes = OptimizedUltraLazyDict(memory_budget_gb=memory_budget_gb)
+        
+        # Check cache first
+        uncached_processes = {}
+        for process_name, files in process_directories.items():
+            if self.cache:
+                cached_data = self.cache.get(process_name)
+                if cached_data is not None:
+                    processes.add_process(process_name, cached_data)
+                    print(f"   ✓ {process_name}: Loaded from cache")
+                    continue
+            
+            uncached_processes[process_name] = files
+        
+        # CRITICAL INSTRUMENTATION POINT 4
+        print(f"[PARALLEL-COORDINATOR] Uncached processes: {len(uncached_processes)}", flush=True)
+        
+        if not uncached_processes:
+            print(f"   🎉 All processes loaded from cache!")
+            return processes
+        
+        print(f"\n   ⚡ Loading {len(uncached_processes)} processes in parallel...")
+        
+        # Prepare loading tasks
+        loading_tasks = []
+        for process_name, files in uncached_processes.items():
+            # CRITICAL INSTRUMENTATION POINT 5 - Task Creation
+            print(f"[PARALLEL-COORDINATOR] Creating task for {process_name}", flush=True)
+            print(f"  Files: {len(files)}", flush=True)
+            print(f"  First file: {files[0] if files else 'NO FILES'}", flush=True)
+            
+            task = LoadingTask(
+                process_name=process_name,
+                files=files,
+                columns=columns,
+                sample_fraction=sample_fraction,
+                memory_budget=memory_allocations.get(process_name, 1.0),
+                particle_type=particle_type
+            )
+            loading_tasks.append(task)
+            
+            # CRITICAL INSTRUMENTATION POINT 6 - Task Validation
+            print(f"  Task created: columns={len(columns) if columns else 'None'}, "
+                f"memory={task.memory_budget:.2f}GB", flush=True)
+        
+        # CRITICAL INSTRUMENTATION POINT 7 - Executor Creation
+        print(f"\n[PARALLEL-COORDINATOR] Creating ProcessPoolExecutor with {self.max_workers} workers", 
+            flush=True)
+        
+        # Execute parallel loading
+        try:
+            with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+                # CRITICAL INSTRUMENTATION POINT 8 - Task Submission
+                print(f"[PARALLEL-COORDINATOR] Submitting {len(loading_tasks)} tasks", flush=True)
+                
+                # Submit all tasks
+                future_to_task = {}
+                for idx, task in enumerate(loading_tasks):
+                    print(f"[PARALLEL-COORDINATOR] Submitting task {idx+1}: {task.process_name}", 
+                        flush=True)
+                    try:
+                        future = executor.submit(self._load_single_process_isolated, task)
+                        future_to_task[future] = task
+                        print(f"  ✓ Task submitted successfully", flush=True)
+                    except Exception as e:
+                        print(f"  ❌ Task submission failed: {type(e).__name__}: {e}", flush=True)
+                
+                print(f"[PARALLEL-COORDINATOR] All tasks submitted, awaiting results...", flush=True)
+                
+                # Process completed tasks
+                completed = 0
+                for future in as_completed(future_to_task):
+                    task = future_to_task[future]
+                    print(f"[PARALLEL-COORDINATOR] Task completed: {task.process_name}", flush=True)
+                    try:
+                        result = future.result()
+                        if result is not None:
+                            processes.add_process(task.process_name, result)
+                            completed += 1
+                            print(f"   ✓ {task.process_name}: Result retrieved successfully")
+                        else:
+                            print(f"   ⚠️ {task.process_name}: Returned None")
+                    except Exception as e:
+                        print(f"   ❌ {task.process_name}: Exception: {type(e).__name__}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        self._loading_stats['failed'] += 1
+                        
+        except Exception as executor_error:
+            print(f"\n[PARALLEL-COORDINATOR] CRITICAL: Executor failed: {type(executor_error).__name__}")
+            print(f"  Message: {executor_error}")
+            import traceback
+            traceback.print_exc()
+            raise
+    
+        # Summary statistics
+        elapsed = time.time() - start_time
+        print(f"\n[PARALLEL-COORDINATOR] Execution complete: {completed}/{len(loading_tasks)} succeeded")
+        
+        return processes
+    
+    @staticmethod
+    def _load_single_process_isolated(task: 'LoadingTask') -> Optional[UnifiedLazyDataFrame]:
+        """
+        Load single process in isolated subprocess with comprehensive diagnostics.
+        
+        Strategic Enhancement: Full visibility into subprocess operations for debugging
+        parallel loading failures, particularly schema mismatches.
+        """
+        import sys
+        import traceback
+        from pathlib import Path
+        
+        try:
+            # Critical imports in subprocess context
+            import polars as pl
+            from layer2_unified_lazy_dataframe import UnifiedLazyDataFrame
+            
+            # Initialize diagnostic context
+            process_id = task.process_name
+            total_files = len(task.files)
+            
+            # Emit process initiation beacon
+            print(f"\n[SUBPROCESS:{process_id}] Initialization", file=sys.stderr)
+            print(f"[SUBPROCESS:{process_id}] Total files: {total_files}", file=sys.stderr)
+            print(f"[SUBPROCESS:{process_id}] Memory budget: {task.memory_budget:.2f} GB", file=sys.stderr)
+            print(f"[SUBPROCESS:{process_id}] Particle type: {task.particle_type}", file=sys.stderr)
+            
+            if not task.files:
+                print(f"[SUBPROCESS:{process_id}] ERROR: No files provided", file=sys.stderr)
+                return None
+            
+            # First-file deep diagnostics
+            sorted_files = sorted(task.files)
+            first_file = sorted_files[0]
+            
+            print(f"\n[SUBPROCESS:{process_id}] First-File Analysis:", file=sys.stderr)
+            print(f"  Name: {first_file.name}", file=sys.stderr)
+            print(f"  Path: {first_file}", file=sys.stderr)
+            print(f"  Size: {first_file.stat().st_size / (1024*1024):.2f} MB", file=sys.stderr)
+            
+            # Attempt comprehensive schema analysis
+            try:
+                test_lf = pl.scan_parquet(str(first_file))
+                available_schema = test_lf.collect_schema()
+                available_cols = list(available_schema.keys())
+                
+                print(f"  Schema discovered: {len(available_cols)} columns", file=sys.stderr)
+                print(f"  First 10 columns: {available_cols[:10]}", file=sys.stderr)
+                
+                # Column matching intelligence
+                if task.columns:
+                    requested_count = len(task.columns)
+                    matches = [col for col in task.columns if col in available_cols]
+                    missing = [col for col in task.columns if col not in available_cols]
+                    match_rate = len(matches) / requested_count * 100 if requested_count > 0 else 0
+                    
+                    print(f"\n[SUBPROCESS:{process_id}] Column Analysis:", file=sys.stderr)
+                    print(f"  Requested: {requested_count} columns", file=sys.stderr)
+                    print(f"  Available: {len(matches)} columns", file=sys.stderr)
+                    print(f"  Match rate: {match_rate:.1f}%", file=sys.stderr)
+                    print(f"  Missing columns (first 10): {missing[:10]}", file=sys.stderr)
+                    
+                    # Critical threshold evaluation
+                    threshold = 0.8  # 80% requirement
+                    threshold_met = len(matches) >= requested_count * threshold
+                    print(f"  Threshold ({threshold*100:.0f}%): {'PASS' if threshold_met else 'FAIL'}", 
+                        file=sys.stderr)
+                    
+                    if not threshold_met:
+                        print(f"\n[SUBPROCESS:{process_id}] CRITICAL: Schema validation failed", 
+                            file=sys.stderr)
+                        print(f"  Required: {int(requested_count * threshold)} columns minimum", 
+                            file=sys.stderr)
+                        print(f"  Available: {len(matches)} columns", file=sys.stderr)
+                        return None
+                else:
+                    print(f"  No column filtering requested - using all {len(available_cols)} columns", 
+                        file=sys.stderr)
+                    
+            except Exception as schema_error:
+                print(f"\n[SUBPROCESS:{process_id}] Schema inspection failed:", file=sys.stderr)
+                print(f"  Error: {str(schema_error)}", file=sys.stderr)
+                print(f"  Traceback: {traceback.format_exc()}", file=sys.stderr)
+                return None
+            
+            # Main loading loop with per-file diagnostics
+            lazy_frames = []
+            schema_info = None
+            files_loaded = 0
+            files_failed = 0
+            
+            print(f"\n[SUBPROCESS:{process_id}] Beginning file loading...", file=sys.stderr)
+            
+            for idx, file_path in enumerate(sorted_files):
+                try:
+                    # Per-file progress indicator
+                    if idx < 3 or idx % 10 == 0:  # First 3 files + every 10th
+                        print(f"[SUBPROCESS:{process_id}] Loading file {idx+1}/{total_files}: "
+                            f"{file_path.name}", file=sys.stderr)
+                    
+                    lf = pl.scan_parquet(str(file_path))
+                    
+                    # Schema validation and column selection
+                    if schema_info is None:
+                        available_cols = list(lf.collect_schema().keys())
+                        
+                        if task.columns:
+                            valid_cols = [col for col in task.columns if col in available_cols]
+                            if len(valid_cols) < len(task.columns) * 0.8:
+                                print(f"[SUBPROCESS:{process_id}] File {idx+1} schema mismatch - skipping", 
+                                    file=sys.stderr)
+                                files_failed += 1
+                                continue
+                            schema_info = valid_cols
+                        else:
+                            schema_info = available_cols
+                        
+                        print(f"[SUBPROCESS:{process_id}] Schema locked: {len(schema_info)} columns", 
+                            file=sys.stderr)
+                    
+                    # Apply transformations
+                    if task.columns and schema_info:
+                        lf = lf.select(schema_info)
+                    
+                    if task.sample_fraction:
+                        lf = lf.filter(pl.col('__event__').hash() % 100 < task.sample_fraction * 100)
+                        if idx == 0:  # Log sampling on first file only
+                            print(f"[SUBPROCESS:{process_id}] Sampling: {task.sample_fraction*100:.1f}%", 
+                                file=sys.stderr)
+                    
+                    lazy_frames.append(lf)
+                    files_loaded += 1
+                    
+                except Exception as file_error:
+                    files_failed += 1
+                    if files_failed <= 3:  # Limit error spam
+                        print(f"[SUBPROCESS:{process_id}] File {idx+1} error: {str(file_error)[:100]}", 
+                            file=sys.stderr)
+            
+            # Loading summary
+            print(f"\n[SUBPROCESS:{process_id}] Loading complete:", file=sys.stderr)
+            print(f"  Files loaded: {files_loaded}/{total_files}", file=sys.stderr)
+            print(f"  Files failed: {files_failed}", file=sys.stderr)
+            
+            if not lazy_frames:
+                print(f"[SUBPROCESS:{process_id}] FAILURE: No valid frames loaded", file=sys.stderr)
+                return None
+            
+            # Create unified DataFrame
+            try:
+                print(f"[SUBPROCESS:{process_id}] Creating UnifiedLazyDataFrame...", file=sys.stderr)
+                
+                df = UnifiedLazyDataFrame(
+                    lazy_frames=lazy_frames,
+                    memory_budget_gb=task.memory_budget,
+                    required_columns=task.columns,
+                    metadata={'process_name': task.process_name} 
+                )
+                
+                print(f"[SUBPROCESS:{process_id}] SUCCESS: DataFrame created", file=sys.stderr)
+                return df
+                
+            except Exception as df_error:
+                print(f"[SUBPROCESS:{process_id}] DataFrame creation failed:", file=sys.stderr)
+                print(f"  Error: {str(df_error)}", file=sys.stderr)
+                print(f"  Traceback: {traceback.format_exc()}", file=sys.stderr)
+                return None
+                
+        except Exception as critical_error:
+            # Catch-all for subprocess failures
+            print(f"\n[SUBPROCESS:{task.process_name}] CRITICAL ERROR:", file=sys.stderr)
+            print(f"  Type: {type(critical_error).__name__}", file=sys.stderr)
+            print(f"  Message: {str(critical_error)}", file=sys.stderr)
+            print(f"  Traceback:\n{traceback.format_exc()}", file=sys.stderr)
+            return None
+        
+    def _calculate_memory_allocations(self, 
+                                    process_sizes: Dict[str, int],
+                                    total_budget_gb: float) -> Dict[str, float]:
+        """Calculate adaptive memory allocation per process."""
+        if not process_sizes:
+            return {}
+        
+        total_size = sum(process_sizes.values())
+        min_allocation_gb = 0.1  # 100MB minimum
+        
+        allocations = {}
+        for process, size in process_sizes.items():
+            if total_size > 0:
+                proportion = size / total_size
+                allocated = max(min_allocation_gb, proportion * total_budget_gb)
+            else:
+                allocated = total_budget_gb / len(process_sizes)
+            
+            allocations[process] = allocated
+        
+        return allocations
+
+@dataclass(frozen=True)
+class FrameworkConfig:
+    """Immutable configuration with validation."""
+    memory_budget_gb: float = 16.0
+    enable_cpp_acceleration: bool = True
+    enable_adaptive_chunking: bool = True
+    cache_dir: Optional[Path] = None
+    default_columns: Optional[List[str]] = None
+    particle_type: Optional[str] = None
+    performance_monitoring: bool = True
+    error_resilience_level: str = 'high'  # 'low', 'medium', 'high'
+    parallel_stages: bool = True
+    energy_condition: str = '5S_scan'  # Default energy condition for weighting
+    apply_luminosity_weights: bool = True  # Enable/disable weighting
+    
+    def __post_init__(self):
+        if self.memory_budget_gb <= 0:
+            raise ValueError("Memory budget must be positive")
+        if self.error_resilience_level not in ['low', 'medium', 'high']:
+            raise ValueError(f"Invalid error resilience level: {self.error_resilience_level}")
+        if self.cache_dir is None:
+            object.__setattr__(self, 'cache_dir', Path.home() / '.belle2_cache')
+        self.cache_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Set default columns based on particle type if not explicitly provided
+        if self.default_columns is None and self.particle_type:
+            object.__setattr__(self, 'default_columns', DEFAULT_KEYS_BY_PARTICLE.get(self.particle_type))
+
+# ============================================================================
+# PROGRESSIVE ANALYSIS MANAGER WITH LUMINOSITY WEIGHTING
+# ============================================================================
+
+class EnhancedProgressiveAnalysis:
+    """
+    Production-ready progressive analysis leveraging Layer2 capabilities with luminosity weighting.
+    
+    Key features:
+    - Full Layer2 integration (no reinventing)
+    - Intelligent caching
+    - Comprehensive validation
+    - Belle II specific enhancements
+    - Automatic luminosity weighting for MC processes
+    """
+    
+    def __init__(self, base_data: OptimizedUltraLazyDict, 
+                 config: Optional[FrameworkConfig] = None):
+        self.base_data = base_data
+        self.config = config or FrameworkConfig()
+        self._stage_cache = {}
+        self._plot_executor = ThreadPoolExecutor(max_workers=3)
+        
+        # Use Layer2 components directly
+        self._optimizer = layer2_optimizers
+        self._profiler = layer2_optimizers.profiler
+        
+        # Initialize luminosity manager
+        self._luminosity_manager = EnhancedLuminosityManager()
+        self._weights_cache = None
+        self._weights_diagnostics = None
+    
+    def _calculate_luminosity_weights(self) -> Dict[str, Dict[str, float]]:
+        """Calculate luminosity weights for all processes."""
+        if self._weights_cache is not None:
+            return self._weights_cache
+        
+        # Organize processes by physics group
+        processes_by_group = defaultdict(list)
+        
+        # Data processes
+        if hasattr(self.base_data, '_groups') and 'data' in self.base_data._groups:
+            processes_by_group['data'] = self.base_data._groups['data']
+        
+        # MC processes - extract from base data
+        for name in self.base_data.keys():
+            if 'data' in name.lower():
+                if 'data' not in processes_by_group:
+                    processes_by_group['data'] = []
+                processes_by_group['data'].append(name)
+            else:
+                # Determine physics group from process name
+                group = self._determine_physics_group(name)
+                processes_by_group[group].append(name)
+        
+        # Calculate weights
+        self._weights_cache, self._weights_diagnostics = self._luminosity_manager.calculate_weights_robust(
+            processes_by_group, 
+            self.config.energy_condition
+        )
+        
+        return self._weights_cache
+    
+    def _determine_physics_group(self, process_name: str) -> str:
+        """Determine physics group from process name."""
+        name_lower = process_name.lower()
+        
+        # Check for specific patterns
+        group_patterns = {
+            'mumu': ['mumu', 'muon'],
+            'ee': ['ee', 'electron', 'bhabha'],
+            'taupair': ['tau'],
+            'qqbar': ['uubar', 'ddbar', 'ssbar', 'ccbar', 'qqbar', 'continuum'],
+            'BBbar': ['bbbar', 'bb_', 'charged', 'mixed', 'b+b-', 'b0b0'],
+            'gg': ['gg', 'gamma', 'photon'],
+            'hhISR': ['hhisr', 'hh_isr', 'hadron_isr'],
+            'llYY': ['llxx', 'llyy', 'four_lepton', 'eeee', 'eemumu']
+        }
+        
+        for group, patterns in group_patterns.items():
+            if any(pattern in name_lower for pattern in patterns):
+                return group
+        
+        # Default to qqbar for unknown processes
+        return 'qqbar'
+    
+    def _compute_stage_histograms_native(self, stage_data: Union[Dict, BroadcastResult],
+                                       variable: str, bins: int,
+                                       range: Optional[Tuple[float, float]]) -> Dict:
+        """
+        Compute histograms using Layer2's native capabilities with luminosity weighting.
+        
+        This is the KEY INTEGRATION: Apply weights during histogram computation.
+        """
+        # Get luminosity weights
+        weights = self._calculate_luminosity_weights() if self.config.apply_luminosity_weights else {}
+        
+        # For BroadcastResult - apply weights during histogram computation
+        if isinstance(stage_data, BroadcastResult):
+            print(f"   📊 Computing weighted histograms across {len(stage_data._valid_results)} processes")
+            
+            # Create weighted histogram results
+            weighted_histograms = {}
+            
+            for name, df in stage_data._valid_results.items():
+                try:
+                    # Get weight for this process
+                    weight = 1.0  # Default for data
+                    
+                    # Find weight in the nested structure
+                    for group, group_weights in weights.items():
+                        if name in group_weights:
+                            weight = group_weights[name]
+                            break
+                    
+                    # Compute histogram
+                    if hasattr(df, 'hist'):
+                        counts, edges = df.hist(variable, bins=bins, range=range)
+                        
+                        # Apply luminosity weight to counts
+                        weighted_counts = counts * weight
+                        
+                        weighted_histograms[name] = (weighted_counts, edges)
+                        print(f"   ✓ {name}: Histogram computed (weight={weight:.4f})")
+                    else:
+                        print(f"   ⚠️ {name}: No hist method available")
+                        
+                except Exception as e:
+                    print(f"   ❌ {name}: {str(e)}")
+            
+            return weighted_histograms
+        
+        # For plain dictionary of DataFrames
+        histograms = {}
+        for name, df in stage_data.items():
+            try:
+                # Get weight
+                weight = 1.0
+                for group, group_weights in weights.items():
+                    if name in group_weights:
+                        weight = group_weights[name]
+                        break
+                
+                # Use native hist method with weighting
+                if hasattr(df, 'hist'):
+                    counts, edges = df.hist(variable, bins=bins, range=range)
+                    weighted_counts = counts * weight
+                    histograms[name] = (weighted_counts, edges)
+                    print(f"   ✓ {name}: Weighted histogram computed (weight={weight:.4f})")
+                else:
+                    print(f"   ⚠️ {name}: No hist method available")
+            except Exception as e:
+                print(f"   ❌ {name}: {str(e)}")
+        
+        return histograms
+    
+    def run_analysis(self, variable: str, 
+                    bins: int = 100,
+                    range: Optional[Tuple[float, float]] = None,
+                    cuts: Optional[List[str]] = None,
+                    stages: Optional[List[str]] = None,
+                    output_dir: str = './belle2_analysis') -> Dict[str, Any]:
+        """Run complete progressive analysis with luminosity weighting."""
+        print(f"\n🎯 PROGRESSIVE ANALYSIS: {variable}")
+        print("=" * 60)
+        
+        # Setup
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True, parents=True)
+        
+        # Default stages with intelligent selection
+        if stages is None:
+            stages = self._select_optimal_stages(variable, cuts)
+        
+        # Initialize results
+        results = self._initialize_results(variable, bins, range, cuts, stages)
+        
+        # Add weight diagnostics to results
+        if self.config.apply_luminosity_weights:
+            self._calculate_luminosity_weights()  # Ensure weights are calculated
+            results['weight_diagnostics'] = self._weights_diagnostics
+        
+        # Execute analysis with Layer2 profiling
+        op_id = f"progressive_analysis_{variable}"
+        self._profiler.start_operation(op_id, 'analysis')
+        
+        try:
+            if self.config.parallel_stages and len(stages) > 2:
+                self._execute_parallel(stages, variable, bins, range, cuts, output_path, results)
+            else:
+                self._execute_sequential(stages, variable, bins, range, cuts, output_path, results)
+            
+            self._profiler.record_cache_hit()
+        except Exception as e:
+            self._profiler.record_cache_miss()
+            raise
+        finally:
+            self._profiler.end_operation(op_id)
+        
+        # Post-processing
+        self._finalize_results(results, output_path)
+        
+        return results
+    
+    def _select_optimal_stages(self, variable: str, cuts: Optional[List[str]]) -> List[str]:
+        """Select stages based on data and variable."""
+        stages = ['baseline', 'candidates']
+        
+        if cuts:
+            stages.append('cuts')
+        
+        # Check for photon capability
+        if self._has_photon_data() and variable in ['EoPRecoil', 'angular_separation']:
+            stages.append('photon')
+            stages.append('efficiency')
+        
+        return stages
+    
+    def _execute_sequential(self, stages: List[str], variable: str, bins: int,
+                          range: Optional[Tuple[float, float]], cuts: List[str],
+                          output_path: Path, results: Dict):
+        """Execute stages sequentially."""
+        for stage in stages:
+            self._execute_stage(stage, variable, bins, range, cuts, output_path, results)
+    
+    def _execute_parallel(self, stages: List[str], variable: str, bins: int,
+                         range: Optional[Tuple[float, float]], cuts: List[str],
+                         output_path: Path, results: Dict):
+        """Execute stages in parallel where possible."""
+        # Independent stages can run in parallel
+        independent = ['baseline']
+        dependent = [s for s in stages if s not in independent]
+        
+        futures = {}
+        
+        # Launch independent stages
+        with ThreadPoolExecutor(max_workers=len(independent)) as executor:
+            for stage in independent:
+                future = executor.submit(
+                    self._execute_stage_safe,
+                    stage, variable, bins, range, cuts, output_path
+                )
+                futures[stage] = future
+            
+            # Collect independent results
+            for stage, future in futures.items():
+                stage_result = future.result()
+                self._merge_stage_results(results, stage, stage_result)
+        
+        # Execute dependent stages sequentially
+        for stage in dependent:
+            self._execute_stage(stage, variable, bins, range, cuts, output_path, results)
+    
+    def _execute_stage_safe(self, stage: str, variable: str, bins: int,
+                           range: Optional[Tuple[float, float]], cuts: List[str],
+                           output_path: Path) -> Dict:
+        """Thread-safe stage execution."""
+        stage_results = {
+            'histograms': {},
+            'statistics': {},
+            'plots': {}
+        }
+        
+        try:
+            self._execute_stage(stage, variable, bins, range, cuts, 
+                              output_path, stage_results)
+        except Exception as e:
+            print(f"   ❌ Stage {stage} failed: {e}")
+            stage_results['error'] = str(e)
+        
+        return stage_results
+    
+    def _execute_stage(self, stage: str, variable: str, bins: int,
+                      range: Optional[Tuple[float, float]], cuts: List[str],
+                      output_path: Path, results: Dict):
+        """Execute single analysis stage."""
+        print(f"\n📊 STAGE: {stage}")
+        print("-" * 30)
+        
+        # Get stage data with caching
+        stage_data = self._get_stage_data_cached(stage, cuts)
+        
+        # Validate columns
+        self._validate_stage_columns(stage_data, variable)
+        
+        # Compute histograms using Layer2 native capabilities with weighting
+        hist_results = self._compute_stage_histograms_native(
+            stage_data, variable, bins, range
+        )
+        
+        # Store results
+        results['histograms'][stage] = hist_results
+        results['statistics'][stage] = self._compute_statistics(hist_results)
+        
+        # Generate plot asynchronously
+        plot_future = self._plot_executor.submit(
+            self._create_stage_plot,
+            hist_results, stage, variable, output_path
+        )
+        results['plots'][stage] = plot_future
+    
+    def _validate_stage_columns(self, data: Union[Dict, BroadcastResult], 
+                           variable: str):
+        """Validate required columns with helpful suggestions."""
+        if data is None:
+            raise ValueError("Stage data is None")
+        # Get first process to check schema
+        if isinstance(data, BroadcastResult):
+            # Handle both _valid_results and results attributes
+            processes = getattr(data, '_valid_results', None) or getattr(data, 'results', {})
+            if not processes and hasattr(data, 'items'):
+                processes = dict(data.items())
+        else:
+            processes = data
+        
+        if not processes:
+            raise ValueError("No valid processes in stage data")
+        
+        # Check first process
+        first_name, first_df = next(iter(processes.items()))
+        
+        # Get available columns
+        if hasattr(first_df, 'columns'):
+            columns = first_df.columns
+        elif hasattr(first_df, '_schema'):
+            columns = list(first_df._schema.keys())
+        else:
+            return  # Can't validate
+        
+        if variable not in columns:
+            # Provide helpful suggestions
+            from difflib import get_close_matches
+            suggestions = get_close_matches(variable, columns, n=3, cutoff=0.6)
+            
+            raise KeyError(
+                f"Variable '{variable}' not found in {first_name}.\n"
+                f"Available columns: {columns[:20]}...\n"
+                f"Did you mean: {suggestions}?"
+            )
+    
+    def _get_stage_data_cached(self, stage: str, cuts: List[str]) -> BroadcastResult:
+        """Get stage data with intelligent caching."""
+        cache_key = f"{stage}_{hash(tuple(cuts or []))}"
+        
+        if cache_key in self._stage_cache:
+            print(f"   📦 Using cached data for {stage}")
+            return self._stage_cache[cache_key]
+        
+        # Build stage data
+        data = self._build_stage_data(stage, cuts)
+        
+        # Cache if reasonable size
+        if self._should_cache_stage(data):
+            self._stage_cache[cache_key] = data
+        
+        return data
+    def _extract_required_columns(self, cuts: List[str]) -> set:
+        """Extract column names from cut expressions."""
+        import re
+        columns = set()
+        
+        for cut in cuts:
+            # Match column names (alphanumeric + underscore, not followed by '(')
+            col_matches = re.findall(r'\b([a-zA-Z_]\w*)\b(?!\s*\()', cut)
+            # Filter out Python keywords and functions
+            columns.update(c for c in col_matches 
+                        if c not in {'abs', 'min', 'max', 'and', 'or', 'not'})
+        
+        return columns
+    
+    def _build_stage_data(self, stage: str, cuts: List[str]) -> BroadcastResult:
+
+        """Build data for specific stage."""
+        if cuts:
+            required_columns = self._extract_required_columns(cuts)
+            missing_deltas = [col for col in required_columns 
+                            if 'abs' in col or 'delta' in col or 'dR' in col]
+            
+            # if missing_deltas:
+            #     print(f"🔧 Auto-creating required columns: {missing_deltas}")
+                # Apply createDeltaColumns to base_data FIRST
+                # enhanced_base = self._enhance_with_delta_columns(self.base_data)
+                # self.base_data = enhanced_base
+            if stage == 'baseline':
+                # Check if delta columns needed
+                if cuts:
+                    import re
+                    all_cols = ' '.join(cuts)
+                    if any(x in all_cols for x in ['absd', 'delta', 'min_delta']):
+                        # Create enhanced base data
+                        enhanced = OptimizedUltraLazyDict(self.base_data.memory_budget_gb)
+                        for name, df in self.base_data.items():
+                            try:
+                                enhanced.add_process(name, df.createDeltaColumns())
+                            except:
+                                enhanced.add_process(name, df)
+                        self.base_data = enhanced
+                
+                # Continue with baseline
+                data_dict = dict(self.base_data.items())
+                br = BroadcastResult({}, 'baseline', self.base_data)
+                br._valid_results = data_dict
+                br.results = data_dict
+                return br
+            
+        elif stage == 'candidates':
+            return self.base_data.oneCandOnly()
+        
+        elif stage == 'cuts':
+            data = self.base_data.oneCandOnly()
+            for cut in cuts or []:
+                data = data.query(cut)
+            return data
+        
+        elif stage == 'photon':
+            data = self._build_stage_data('cuts', cuts)
+            return self._apply_photon_selection(data)
+        
+        else:
+            raise ValueError(f"Unknown stage: {stage}")
+        
+    def _apply_photon_selection(self, data: BroadcastResult) -> BroadcastResult:
+        """Apply photon selection with method injection."""
+        results = {}
+        errors = []
+        
+        for name, df in data._valid_results.items():
+            try:
+                # Inject methods if needed
+                if not hasattr(df, 'select_best_photon'):
+                    self._inject_photon_methods(df.__class__)
+                
+                # Apply selection
+                selected = df.select_best_photon()
+                results[name] = selected
+                
+            except Exception as e:
+                errors.append(f"{name}: {str(e)}")
+        
+        br = BroadcastResult(results, 'photon_selection', self.base_data)
+        br._errors = errors
+        return br
+    
+    def _inject_photon_methods(self, dataframe_class):
+        """Inject photon analysis methods - Belle II specific enhancement."""
+        
+        def angular_separation(self) -> pl.Expr:
+            """Compute angular separation between recoil and photon."""
+            # Check required columns
+            required = ['pRecoil', 'pRecoilTheta', 'pRecoilPhi', 'E', 'theta', 'phi']
+            if hasattr(self, 'columns'):
+                missing = [col for col in required if col not in self.columns]
+                if missing:
+                    raise ValueError(f"Missing columns for angular separation: {missing}")
+            
+            # Vectorized Polars expression
+            p_dot = (
+                pl.col('pRecoil') * pl.col('pRecoilTheta').sin() * pl.col('pRecoilPhi').cos() *
+                pl.col('E') * pl.col('theta').sin() * pl.col('phi').cos() +
+                pl.col('pRecoil') * pl.col('pRecoilTheta').sin() * pl.col('pRecoilPhi').sin() *
+                pl.col('E') * pl.col('theta').sin() * pl.col('phi').sin() +
+                pl.col('pRecoil') * pl.col('pRecoilTheta').cos() *
+                pl.col('E') * pl.col('theta').cos()
+            )
+            return (p_dot / (pl.col('pRecoil') * pl.col('E'))).arccos()
+        
+        def select_best_photon(self, nan_fill: float = 4.0) -> 'UnifiedLazyDataFrame':
+            """Select best photon per event."""
+            # Add angular separation
+            df_with_angular = self.with_columns(
+                angular_separation(self).alias('angular_separation')
+            )
+            
+            # Fill NaN and select minimum
+            df_filled = df_with_angular.with_columns(
+                pl.col('angular_separation').fill_nan(nan_fill)
+            )
+            
+            # Group and select
+            group_cols = ['__experiment__', '__run__', '__event__', '__production__']
+            df_best = df_filled.sort('angular_separation').group_by(group_cols).first()
+            
+            # Add E/pRecoil and apply energy cut
+            return df_best.with_columns(
+                (pl.col('E') / pl.col('pRecoil')).fill_nan(0).alias('EoPRecoil')
+            ).filter((pl.col('E') > 0.075) | pl.col('E').is_null())
+        
+        # Add methods to class
+        dataframe_class.angular_separation = angular_separation
+        dataframe_class.select_best_photon = select_best_photon
+    
+    def _create_stage_plot(self, histograms: Dict, stage: str, 
+                          variable: str, output_path: Path) -> str:
+        """Create publication-quality plot with enhancements."""
+        fig = plt.figure(figsize=(12, 9))
+        gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+        
+        ax_main = fig.add_subplot(gs[0])
+        ax_ratio = fig.add_subplot(gs[1], sharex=ax_main)
+        
+        # Group histograms - weighted histograms are already properly scaled
+        grouped = self._group_histograms_by_physics(histograms)
+        
+        # Plot with enhanced styling
+        mc_total, data_hist = self._plot_stacked_histograms(grouped, ax_main)
+        
+        # Ratio panel with gray bars
+        if data_hist is not None and mc_total is not None:
+            self._create_enhanced_ratio_panel(ax_ratio, data_hist, mc_total)
+        
+        # Styling
+        self._apply_belle2_styling(ax_main, ax_ratio, variable, stage)
+        
+        # Save
+        filename = f"belle2_{stage}_{variable}.pdf"
+        filepath = output_path / filename
+        
+        fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        return str(filepath)
+    
+    def _create_enhanced_ratio_panel(self, ax_ratio, data_hist, mc_total):
+        """Enhanced ratio panel with gray deviation bars and MC uncertainty."""
+        data_counts, edges, data_errors = data_hist
+        mc_counts, mc_errors = mc_total
+        
+        bin_centers = (edges[:-1] + edges[1:]) / 2
+        bin_width = np.mean(np.diff(edges))
+        
+        # Calculate ratio with proper error propagation
+        ratio = np.ones_like(data_counts)
+        ratio_err = np.zeros_like(data_counts)
+        
+        valid = (mc_counts > 0) & (data_counts >= 0)
+        ratio[valid] = data_counts[valid] / mc_counts[valid]
+        
+        # Error propagation
+        rel_data = np.zeros_like(data_counts)
+        rel_mc = np.zeros_like(mc_counts)
+        
+        data_valid = (data_counts > 0) & valid
+        rel_data[data_valid] = data_errors[data_valid] / data_counts[data_valid]
+        rel_mc[valid] = mc_errors[valid] / mc_counts[valid]
+        
+        ratio_err[valid] = ratio[valid] * np.sqrt(rel_data[valid]**2 + rel_mc[valid]**2)
+        
+        # Gray deviation bars
+        for i, (center, r) in enumerate(zip(bin_centers[valid], ratio[valid])):
+            height = abs(r - 1)
+            bottom = min(r, 1)
+            ax_ratio.bar(center, height, width=bin_width * 0.8,
+                        bottom=bottom, color='gray', alpha=0.5,
+                        edgecolor='none', zorder=10)
+        
+        # MC uncertainty band
+        ax_ratio.fill_between(bin_centers, 1 - rel_mc, 1 + rel_mc,
+                            alpha=0.3, color='yellow', zorder=5,
+                            label='MC uncertainty')
+        
+        # Data points
+        ax_ratio.errorbar(bin_centers[valid], ratio[valid], yerr=ratio_err[valid],
+                         fmt='o', color='black', markersize=4, zorder=100)
+        
+        # Unity line
+        ax_ratio.axhline(y=1, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+        
+        # Smart y-range
+        if np.any(valid):
+            y_values = ratio[valid]
+            y_median = np.median(y_values)
+            y_std = np.std(y_values)
+            ax_ratio.set_ylim(
+                max(0.5, y_median - 2*y_std),
+                min(2.0, y_median + 2*y_std)
+            )
+    
+    def _generate_efficiency(self, results: Dict, variable: str, output_path: Path):
+        """Generate efficiency plot with proper binomial statistics."""
+        baseline = results['histograms'].get('baseline')
+        selected = results['histograms'].get('photon', results['histograms'].get('cuts'))
+        
+        if not baseline or not selected:
+            return
+        
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Process by physics group
+        for group in self.base_data._groups:
+            if group in ['all', 'data']:
+                continue
+            
+            # Aggregate
+            base_counts, edges = self._aggregate_group_histograms(baseline, 
+                                                                 self.base_data._groups[group])
+            sel_counts, _ = self._aggregate_group_histograms(selected,
+                                                            self.base_data._groups[group])
+            
+            if base_counts is None or sel_counts is None:
+                continue
+            
+            # Efficiency with Clopper-Pearson intervals
+            eff, err_low, err_high = self._clopper_pearson_efficiency(sel_counts, base_counts)
+            
+            # Plot with asymmetric errors
+            bin_centers = (edges[:-1] + edges[1:]) / 2
+            color = self._get_group_color(group)
+            
+            ax.errorbar(bin_centers, eff, 
+                       yerr=[eff - err_low, err_high - eff],
+                       fmt='o-', color=color, 
+                       label=self._get_physics_label(group),
+                       markersize=6, linewidth=2, capsize=3)
+        
+        # Styling
+        ax.set_xlabel(self._get_variable_label(variable), fontsize=14)
+        ax.set_ylabel('Efficiency', fontsize=14)
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='best')
+        
+        filepath = output_path / f"efficiency_{variable}.pdf"
+        fig.savefig(filepath, dpi=300, bbox_inches='tight')
+        plt.close(fig)
+        
+        results['plots']['efficiency'] = str(filepath)
+    
+    def _clopper_pearson_efficiency(self, k: np.ndarray, n: np.ndarray, 
+                                   confidence: float = 0.68) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Calculate Clopper-Pearson confidence intervals."""
+        from scipy import stats
+        
+        eff = np.zeros_like(k, dtype=float)
+        err_low = np.zeros_like(k, dtype=float)
+        err_high = np.zeros_like(k, dtype=float)
+        
+        alpha = 1 - confidence
+        
+        for i in range(len(k)):
+            if n[i] == 0:
+                eff[i] = 0
+                err_low[i] = 0
+                err_high[i] = 0
+            else:
+                eff[i] = k[i] / n[i]
+                err_low[i] = stats.beta.ppf(alpha/2, k[i], n[i] - k[i] + 1) if k[i] > 0 else 0
+                err_high[i] = stats.beta.ppf(1 - alpha/2, k[i] + 1, n[i] - k[i]) if k[i] < n[i] else 1
+        
+        return eff, err_low, err_high
+    
+    # Helper methods
+    def _initialize_results(self, variable: str, bins: int, 
+                          range: Optional[Tuple[float, float]], 
+                          cuts: List[str], stages: List[str]) -> Dict:
+        """Initialize results structure."""
+        return {
+            'variable': variable,
+            'configuration': {
+                'bins': bins,
+                'range': range,
+                'cuts': cuts,
+                'stages': stages,
+                'framework_version': '2.1.0',
+                'energy_condition': self.config.energy_condition,
+                'luminosity_weighting': self.config.apply_luminosity_weights
+            },
+            'histograms': {},
+            'plots': {},
+            'statistics': {},
+            'metadata': {
+                'start_time': time.time(),
+                'system_info': self._get_system_info()
+            }
+        }
+    
+    def _get_system_info(self) -> Dict:
+        """Get system information for reproducibility."""
+        import platform
+        return {
+            'python': platform.python_version(),
+            'platform': platform.platform(),
+            'memory_gb': self.config.memory_budget_gb
+        }
+    
+    def _finalize_results(self, results: Dict, output_path: Path):
+        """Finalize results and resolve futures."""
+        # Resolve plot futures
+        for stage, future in results['plots'].items():
+            if hasattr(future, 'result'):
+                try:
+                    results['plots'][stage] = future.result(timeout=30)
+                except Exception as e:
+                    print(f"   ⚠️ Plot generation failed for {stage}: {e}")
+                    results['plots'][stage] = None
+        
+        # Generate efficiency if applicable
+        if 'efficiency' in results['configuration']['stages']:
+            self._generate_efficiency(results, results['variable'], output_path)
+        
+        # Finalize metadata
+        results['metadata']['total_time'] = time.time() - results['metadata']['start_time']
+        results['metadata']['cache_stats'] = {
+            'stage_cache_size': len(self._stage_cache),
+            'memory_usage_mb': self._estimate_cache_memory() / 1e6
+        }
+        
+        # Generate report
+        results['report'] = self._generate_analysis_report(results)
+    
+    def _estimate_cache_memory(self) -> int:
+        """Estimate memory usage of cached data."""
+        total = 0
+        for data in self._stage_cache.values():
+            if isinstance(data, BroadcastResult):
+                # Rough estimate
+                total += len(data.results) * 1_000_000  # 1MB per process estimate
+        return total
+    
+    def _generate_analysis_report(self, results: Dict) -> str:
+        """Generate comprehensive analysis report."""
+        report = f"""
+# Progressive Analysis Report
+
+**Variable**: {results['variable']}
+**Generated**: {time.strftime('%Y-%m-%d %H:%M:%S')}
+
+## Configuration
+- Bins: {results['configuration']['bins']}
+- Range: {results['configuration']['range']}
+- Cuts: {len(results['configuration']['cuts'] or [])}
+- Stages: {', '.join(results['configuration']['stages'])}
+- Energy Condition: {results['configuration']['energy_condition']}
+- Luminosity Weighting: {'Enabled' if results['configuration']['luminosity_weighting'] else 'Disabled'}
+
+## Results Summary
+"""
+        
+        # Stage statistics
+        for stage, stats in results['statistics'].items():
+            report += f"\n### Stage: {stage}\n"
+            for key, value in stats.items():
+                if isinstance(value, (int, float)):
+                    report += f"- {key}: {value:,.0f}\n"
+                elif isinstance(value, dict):
+                    report += f"- {key}: {len(value)} items\n"
+                else:
+                    report += f"- {key}: {str(value)}\n"
+        
+        # Performance
+        report += f"\n## Performance\n"
+        report += f"- Total time: {results['metadata']['total_time']:.2f}s\n"
+        report += f"- Cache efficiency: {len(self._stage_cache)}/{len(results['configuration']['stages'])}\n"
+        
+        # Weight diagnostics if available
+        if 'weight_diagnostics' in results:
+            report += f"\n## Luminosity Weight Diagnostics\n"
+            for group, diagnostics in results['weight_diagnostics'].items():
+                if group != 'data':
+                    report += f"\n### {group}\n"
+                    for diag in diagnostics[:3]:  # Show first 3
+                        if 'error' not in diag:
+                            report += f"- {diag['process']}: weight={diag['weight']:.4f} (method={diag['method']})\n"
+        
+        return report
+    
+    # Additional helper methods for plotting and statistics
+    def _group_histograms_by_physics(self, histograms: Dict) -> Dict:
+        """Group histograms by physics process type."""
+        grouped = {'mc': {}, 'data': None}
+        
+        # Create reverse mapping from process to group
+        process_to_group = {}
+        if hasattr(self.base_data, '_groups'):
+            for group, processes in self.base_data._groups.items():
+                for process in processes:
+                    process_to_group[process] = group
+        else:
+            # Fallback: determine group from process name
+            for process in histograms.keys():
+                process_to_group[process] = self._determine_physics_group(process)
+        
+        # Group histograms
+        for process, hist_data in histograms.items():
+            if hist_data is None:
+                continue
+                
+            counts, edges = hist_data
+            group = process_to_group.get(process, 'qqbar')
+            
+            if 'data' in process.lower():
+                # Aggregate data
+                if grouped['data'] is None:
+                    grouped['data'] = (counts.copy(), edges, np.sqrt(counts))
+                else:
+                    grouped['data'] = (
+                        grouped['data'][0] + counts,
+                        edges,
+                        np.sqrt(grouped['data'][0] + counts)
+                    )
+            else:
+                # Aggregate MC by physics group
+                if group not in grouped['mc']:
+                    grouped['mc'][group] = (counts.copy(), edges, np.sqrt(counts))
+                else:
+                    old_counts = grouped['mc'][group][0]
+                    grouped['mc'][group] = (
+                        old_counts + counts,
+                        edges,
+                        np.sqrt(old_counts + counts)
+                    )
+        
+        return grouped
+    
+    def _plot_stacked_histograms(self, grouped: Dict, ax):
+        """Plot stacked MC with proper Belle II styling."""
+        colors = {
+            'mumu': '#E31A1C', 'ee': '#1F78B4', 'qqbar': '#33A02C',
+            'BBbar': '#8C564B', 'taupair': '#6A3D9A', 'gg': '#FF7F00',
+            'hhISR': '#666666', 'llYY': '#FFD92F'
+        }
+        
+        mc_total = None
+        mc_errors = None
+        bottom = None
+        
+        # Stack MC components
+        for group in ['BBbar', 'qqbar', 'taupair', 'ee', 'mumu', 'gg', 'hhISR', 'llYY']:
+            if group not in grouped['mc']:
+                continue
+            
+            counts, edges, errors = grouped['mc'][group]
+            
+            if mc_total is None:
+                mc_total = counts.copy()
+                mc_errors = errors.copy()
+                bottom = np.zeros_like(counts)
+            else:
+                mc_total += counts
+                mc_errors = np.sqrt(mc_errors**2 + errors**2)
+            
+            bin_centers = (edges[:-1] + edges[1:]) / 2
+            bin_widths = np.diff(edges)
+            
+            # ax.bar(bin_centers, counts, width=bin_widths,
+            #       bottom=bottom, color=colors.get(group, '#888'),
+            #       alpha=0.8, edgecolor='black', linewidth=0.5,
+            #       label=self._get_physics_label(group))
+            ax.hist(bin_centers, weights=counts, bins=edges,
+                     bottom=bottom, color=colors.get(group, '#888'),
+                     alpha=0.9, edgecolor='black', linewidth=1,
+                     label=self._get_physics_label(group),histtype='stepfilled') 
+            
+            bottom += counts
+        
+        # Plot data if available
+        data_hist = None
+        if grouped.get('data'):
+            data_counts, data_edges, data_errors = grouped['data']
+            bin_centers = (data_edges[:-1] + data_edges[1:]) / 2
+            
+            ax.errorbar(bin_centers, data_counts, yerr=data_errors,
+                       fmt='o', color='black', markersize=4,
+                       label='Data', zorder=100)
+            
+            data_hist = (data_counts, data_edges, data_errors)
+        
+        return (mc_total, mc_errors) if mc_total is not None else None, data_hist
+    
+    def _apply_belle2_styling(self, ax_main, ax_ratio, variable: str, stage: str):
+        """Apply Belle II standard plot styling with enhanced labels."""
+        # Get framework instance for label lookup
+        framework = getattr(self, '_framework', None)
+        
+        # Get proper label
+        if framework and hasattr(framework, 'get_variable_label'):
+            xlabel = framework.get_variable_label(variable)
+        else:
+            xlabel = self._get_variable_label(variable)
+        
+        # Main panel
+        ax_main.set_ylabel('Events / bin', fontsize=14)
+        ax_main.set_yscale('log')
+        ax_main.legend(loc='upper right', fontsize=10, ncol=2)
+        ax_main.grid(True, alpha=0.3)
+        ax_main.tick_params(labelbottom=False)
+        
+        # Add Belle II label
+        ax_main.text(0.05, 0.95, 'Belle II', transform=ax_main.transAxes,
+                    fontsize=16, weight='bold', va='top')
+        ax_main.text(0.05, 0.88, f'Stage: {stage}', transform=ax_main.transAxes,
+                    fontsize=12, va='top')
+        
+        # Ratio panel with proper label
+        ax_ratio.set_xlabel(xlabel, fontsize=14)
+        ax_ratio.set_ylabel('Data/MC', fontsize=14)
+        ax_ratio.grid(True, alpha=0.3)
+        ax_ratio.set_ylim(0.8, 1.2)
+        
+    def _compute_statistics(self, histograms: Dict) -> Dict:
+        """Compute statistics from histograms."""
+        total_events = sum(np.sum(h[0]) for h in histograms.values() if h is not None)
+        n_processes = len(histograms)
+        
+        # Separate data and MC
+        data_events = 0
+        mc_events = 0
+        
+        for name, hist in histograms.items():
+            if hist is not None:
+                events = np.sum(hist[0])
+                if 'data' in name.lower():
+                    data_events += events
+                else:
+                    mc_events += events
+        
+        return {
+            'total_events': total_events,
+            'n_processes': n_processes,
+            'data_events': data_events,
+            'mc_events': mc_events,
+            'avg_events_per_process': total_events / n_processes if n_processes > 0 else 0
+        }
+    
+    def _aggregate_group_histograms(self, histograms: Dict, 
+                                   processes: List[str]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Aggregate histograms for a group."""
+        combined = None
+        edges = None
+        
+        for process in processes:
+            if process in histograms and histograms[process] is not None:
+                counts, hist_edges = histograms[process]
+                if combined is None:
+                    combined = counts.copy()
+                    edges = hist_edges
+                else:
+                    combined += counts
+        
+        return combined, edges
+    
+    def _has_photon_data(self) -> bool:
+        """Check if photon variables are available."""
+        if not self.base_data:
+            return False
+        
+        # Check first process
+        first_df = next(iter(self.base_data.values()), None)
+        if first_df and hasattr(first_df, 'columns'):
+            required = ['E', 'theta', 'phi', 'pRecoilTheta', 'pRecoilPhi']
+            return all(col in first_df.columns for col in required)
+        
+        return False
+    
+    def _should_cache_stage(self, data: BroadcastResult) -> bool:
+        """Determine if stage data should be cached."""
+        if data is None:
+            return False
+        
+        # Check for results attribute
+        if not hasattr(data, 'results') or not data.results:
+            return False
+        
+        # Don't cache very large results
+        estimated_size = len(data.results) * 1_000_000  # 1MB per process estimate
+        max_cache_size = self.config.memory_budget_gb * 1024 * 1024 * 1024 * 0.1  # 10% of budget
+        
+        return estimated_size < max_cache_size
+    
+    def _get_group_color(self, group: str) -> str:
+        """Get consistent color for physics group."""
+        colors = {
+            'mumu': '#E31A1C', 'ee': '#1F78B4', 'qqbar': '#33A02C',
+            'BBbar': '#8C564B', 'taupair': '#6A3D9A', 'gg': '#FF7F00',
+            'hhISR': '#666666', 'llYY': '#FFD92F'
+        }
+        return colors.get(group, '#888888')
+    
+    def _get_physics_label(self, group: str) -> str:
+        """Get LaTeX label for physics group."""
+        labels = {
+            'mumu': r'$\mu^+\mu^-$', 'ee': r'$e^+e^-$', 
+            'qqbar': r'$q\bar{q}$', 'BBbar': r'$B\bar{B}$',
+            'taupair': r'$\tau^+\tau^-$', 'gg': r'$\gamma\gamma$',
+            'hhISR': r'$h^+h^-\gamma_{ISR}$', 'llYY': r'$\ell^+\ell^-\gamma\gamma$'
+        }
+        return labels.get(group, group)
+    
+    def _get_variable_label(self, variable: str) -> str:
+        """Get LaTeX label for variable."""
+        labels = {
+            'pRecoil': r'$p_{\mathrm{recoil}}$ [GeV/c]',
+            'M_bc': r'$M_{\mathrm{bc}}$ [GeV/c$^2$]',
+            'delta_E': r'$\Delta E$ [GeV]',
+            'EoPRecoil': r'$E/p_{\mathrm{recoil}}$',
+            'angular_separation': r'$\theta_{\gamma,\mathrm{recoil}}$ [rad]'
+        }
+        return labels.get(variable, variable)
+    
+    def _merge_stage_results(self, main_results: Dict, stage: str, stage_results: Dict):
+        """Merge stage results into main results."""
+        for key in ['histograms', 'statistics', 'plots']:
+            if key in stage_results:
+                main_results[key][stage] = stage_results[key]
+
+# ============================================================================
+# PARTICLE DATA LOADER (unchanged from original)
+# ============================================================================
+
+class ParticleDataLoader:
+    """
+    Flexible loader for different particle reconstruction patterns.
+    
+    Key features:
+    - Directory-based loading with Belle II structure
+    - Automatic column selection based on particle type
+    - Parallel loading with process isolation
+    - Hierarchical caching for performance
+    - Method injection for particle-specific analysis
+    """
+    
+    def __init__(self, particle_type: str = 'vpho', 
+                 config: Optional[FrameworkConfig] = None):
+        self.particle_type = particle_type
+        self.config = config or FrameworkConfig()
+        
+        # Initialize high-performance subsystems
+        self._init_cache()
+        self._init_parallel_loader()
+        
+        # Method injectors for particle-specific functionality
+        self._method_injectors = {
+            'gamma': self._inject_photon_methods,
+            'photon': self._inject_photon_methods,
+            'electron': self._inject_electron_methods,
+            'muon': self._inject_muon_methods
+        }
+    
+    def _init_cache(self):
+        """Initialize hierarchical caching system."""
+        cache_config = {
+            'memory_cache_gb': self.config.memory_budget_gb * 0.2,  # 20% for cache
+            'disk_cache_dir': self.config.cache_dir / 'particle_data',
+            'cache_ttl_hours': 48
+        }
+        
+        self.cache = HierarchicalCache(**cache_config)
+        print(f"   💾 Cache system initialized")
+    
+    def _init_parallel_loader(self):
+        """Initialize parallel loading system."""
+        # Determine optimal worker count
+        available_cores = os.cpu_count() or 4
+        max_workers = min(
+            available_cores - 1,  # Leave one core for main process
+            8,  # Cap at 8 for I/O bound tasks
+            int(self.config.memory_budget_gb / 2)  # 2GB per worker minimum
+        )
+        
+        self.parallel_loader = ParallelDirectoryLoader(
+            max_workers=max_workers,
+            cache=self.cache
+        )
+        
+    def load(self, base_dir: str, 
+             pattern: Optional[str] = None,
+             columns: Optional[List[str]] = None,
+             sample_fraction: Optional[float] = None,
+             use_parallel: bool = True,
+             use_cache: bool = True) -> OptimizedUltraLazyDict:
+        """
+        Load particle data with high-performance optimizations.
+        
+        Structure: base_dir/process_directory/*.parquet
+        Each immediate subdirectory of base_dir represents one process/dataset.
+        
+        Args:
+            base_dir: Base directory containing process subdirectories
+            pattern: Directory name pattern filter (e.g., '*data*', '*mumu*')
+            columns: Columns to load (None uses particle-specific defaults)
+            sample_fraction: Fraction of data to sample (for testing)
+            use_parallel: Enable parallel loading (default: True)
+            use_cache: Enable caching (default: True)
+            
+        Returns:
+            Enhanced OptimizedUltraLazyDict with particle-specific methods
+        """
+        start_time = time.time()
+        
+        # Determine columns to load
+        if columns is None:
+            columns = DEFAULT_KEYS_BY_PARTICLE.get(self.particle_type)
+            if columns:
+                print(f"   Using {len(columns)} default columns for {self.particle_type}")
+        
+        # Convert base_dir to Path
+        base_path = Path(base_dir)
+        if not base_path.exists():
+            raise FileNotFoundError(f"Base directory not found: {base_dir}")
+        
+        print(f"🔍 Loading {self.particle_type} data (High-Performance Mode)")
+        print(f"   📂 Base directory: {base_dir}")
+        print(f"   ⚡ Parallel loading: {'Enabled' if use_parallel else 'Disabled'}")
+        print(f"   💾 Caching: {'Enabled' if use_cache else 'Disabled'}")
+        if columns:
+            print(f"   📋 Target columns: {len(columns)} selected")
+        
+        # Disable cache if requested
+        if not use_cache:
+            self.cache = None
+            self.parallel_loader.cache = None
+        
+        # CRITICAL: Find immediate subdirectories only (not recursive)
+        process_directories = self._discover_process_directories(base_path, pattern)
+        
+        if not process_directories:
+            raise FileNotFoundError(f"No process directories with parquet files found in {base_dir}")
+        
+        print(f"   📊 Total: {len(process_directories)} process directories")
+        
+        # Apply energy filtering BEFORE loading
+        filtered_directories = self._apply_energy_filtering(process_directories)
+        
+        if not filtered_directories:
+            raise ValueError(f"No directories passed energy condition filtering")
+        
+        # Load with selected strategy
+        if use_parallel and len(filtered_directories) > 1:
+            processes = self.parallel_loader.load_directories_parallel(
+                filtered_directories,
+                columns,
+                sample_fraction,
+                self.config.memory_budget_gb,
+                self.particle_type
+            )
+        else:
+            # Sequential loading
+            processes = self._load_directories_sequential(
+                filtered_directories, columns, sample_fraction
+            )
+        
+        # Enhance with particle-specific methods
+        self._enhance_processes(processes)
+        
+        # Group processes by physics type
+        self._organize_process_groups(processes)
+        
+        # Validate
+        self._validate_loaded_data(processes)
+        
+        # Report performance
+        elapsed = time.time() - start_time
+        print(f"\n✅ Loading complete:")
+        print(f"   ⏱️  Total time: {elapsed:.2f}s")
+        print(f"   📊 Loaded: {len(processes)} processes")
+        print(f"   🚀 Speed: {len(processes)/elapsed:.1f} processes/sec")
+        
+        # Cache statistics
+        if self.cache:
+            stats = self.cache.stats()
+            print(f"   💾 Cache stats: {stats['memory_entries']} in memory, "
+                  f"{stats['disk_entries']} on disk")
+        
+        return processes
+    
+    def _discover_process_directories(self, base_path: Path, 
+                                pattern: Optional[str]) -> Dict[str, List[Path]]:
+        """Discover process directories with size filtering and diagnostic logging."""
+        process_directories = {}
+        MIN_FILE_SIZE_MB = 1.0  # Configurable threshold
+        
+        # Track first file for diagnostic purposes
+        first_file_logged = False
+        total_files_found = 0
+        total_files_accepted = 0
+        
+        print(f"\n🔍 Discovering {self.particle_type} files in {base_path}")
+        print(f"   Minimum size threshold: {MIN_FILE_SIZE_MB} MB")
+        
+        for entry in base_path.iterdir():
+            if not entry.is_dir():
+                continue
+            
+            # Find combined files
+            combined_files = list(entry.glob(f'*{self.particle_type}*.parquet'))
+            total_files_found += len(combined_files)
+            
+            # Filter: remove temp files AND check size
+            valid_files = []
+            for f in combined_files:
+                if 'tmp' not in f.name:
+                    size_mb = f.stat().st_size / (1024 * 1024)
+                    if size_mb >= MIN_FILE_SIZE_MB:
+                        valid_files.append(f)
+                        total_files_accepted += 1
+                        
+                        # Log first valid file for diagnostics
+                        if not first_file_logged:
+                            print(f"\n   🎯 FIRST FILE DETECTED:")
+                            print(f"      Directory: {entry.name}")
+                            print(f"      File: {f.name}")
+                            print(f"      Size: {size_mb:.2f} MB")
+                            print(f"      Full path: {f}")
+                            
+                            # Quick schema preview if possible
+                            try:
+                                import polars as pl
+                                schema = pl.scan_parquet(str(f)).collect_schema()
+                                print(f"      Columns: {len(schema)}")
+                                print(f"      First 5 columns: {list(schema.keys())[:5]}")
+                            except Exception as e:
+                                print(f"      Schema check failed: {e}")
+                            
+                            first_file_logged = True
+                            print()  # Blank line for readability
+                    else:
+                        print(f"   ⚠️  Skipping {f.name}: {size_mb:.2f}MB < {MIN_FILE_SIZE_MB}MB")
+            
+            if valid_files:
+                process_directories[entry.name] = valid_files
+                print(f"   ✓ {entry.name}: {len(valid_files)} valid files")
+        
+        # Summary statistics
+        print(f"\n📊 Discovery Summary:")
+        print(f"   Total {self.particle_type} files found: {total_files_found}")
+        print(f"   Files meeting size criteria: {total_files_accepted}")
+        print(f"   Directories with valid files: {len(process_directories)}")
+        
+        if not process_directories:
+            print(f"   ⚠️  WARNING: No valid {self.particle_type} files found!")
+        
+        return process_directories  
+    def _load_single_process(self, process_name: str, file_list: List[Path],
+                       columns: Optional[List[str]], 
+                       sample_fraction: Optional[float]) -> Optional[UnifiedLazyDataFrame]:
+        # """Load single process directory with smart file selection."""
+        # Check if we have a combined file
+        combined_files = [f for f in file_list if self.particle_type in f.name]
+        
+        if combined_files:
+            # Use only the combined file(s)
+            files_to_load = combined_files
+            print(f"      Loading {len(files_to_load)} combined {self.particle_type} file(s)")
+        else:
+            # Use all files (likely from subtasks)
+            files_to_load = file_list
+            print(f"      Loading {len(files_to_load)} subtask files")
+        
+        lazy_frames = []
+        schema_info = None
+        files_loaded = 0
+        
+        for file_path in sorted(files_to_load):
+            try:
+                lf = pl.scan_parquet(str(file_path))
+                
+                # Schema validation on first file
+                if schema_info is None:
+                    available_cols = list(lf.collect_schema().keys())
+                    
+                    if columns:
+                        valid_cols = [col for col in columns if col in available_cols]
+                        if len(valid_cols) < len(columns) * 0.8:
+                            print(f"      ⚠️  Insufficient columns in {process_name}")
+                            return None
+                        schema_info = valid_cols
+                    else:
+                        schema_info = available_cols
+                
+                # Apply column selection
+                if columns and schema_info:
+                    lf = lf.select(schema_info)
+                
+                # Apply sampling
+                if sample_fraction:
+                    lf = lf.filter(pl.col('__event__').hash() % 100 < sample_fraction * 100)
+                
+                lazy_frames.append(lf)
+                files_loaded += 1
+                
+            except Exception as e:
+                warnings.warn(f"Skipping {file_path.name}: {e}")
+        
+        if not lazy_frames:
+            return None
+        
+        # Create unified DataFrame
+        df = UnifiedLazyDataFrame(
+            lazy_frames=lazy_frames,
+            memory_budget_gb=self.config.memory_budget_gb / 10,  # Rough estimate
+            required_columns=columns,
+            process_name=process_name
+        )
+        
+        return dfs
+            
+    # def _load_directories_sequential(self, process_directories: Dict[str, List[Path]], 
+    #                                columns: Optional[List[str]],
+    #                                sample_fraction: Optional[float]) -> OptimizedUltraLazyDict:
+    #     """Sequential loading with cache support."""
+    #     processes = OptimizedUltraLazyDict(memory_budget_gb=self.config.memory_budget_gb)
+    #     print('file_list:', file_list)
+    #     for process_name, file_list in process_directories.items():
+    #         # Check cache first
+    #         if self.cache:
+    #             cached_data = self.cache.get(process_name)
+    #             if cached_data is not None:
+    #                 processes.add_process(process_name, cached_data)
+    #                 print(f"   ✓ {process_name}: Loaded from cache")
+    #                 continue
+            
+    #         # Load from files
+    #         try:
+    #             df = self._load_single_process(
+    #                 process_name, file_list, columns, sample_fraction
+    #             )
+                
+    #             if df is not None:
+    #                 processes.add_process(process_name, df)
+                    
+    #                 # Cache the result
+    #                 if self.cache:
+    #                     self.cache.put(process_name, df)
+                    
+    #                 print(f"   ✓ {process_name}: Loaded successfully")
+                    
+    #         except Exception as e:
+    #             print(f"   ❌ {process_name}: Loading failed - {e}")
+        
+    #     return processes
+    
+    # def _load_single_process(self, process_name: str, file_list: List[Path],
+    #                        columns: Optional[List[str]], 
+    #                        sample_fraction: Optional[float]) -> Optional[UnifiedLazyDataFrame]:
+    #     """Load single process directory with comprehensive diagnostics."""
+    #     lazy_frames = []
+    #     schema_info = None
+    #     files_loaded = 0
+        
+    #     print(f"\n📁 Loading {process_name}...")
+    #     print(f"   Files to process: {len(file_list)}")
+        
+    #     # CRITICAL: Show first file being loaded
+    #     if file_list:
+    #         first_file = sorted(file_list)[0]
+    #         print(f"\n   🎯 FIRST FILE TO LOAD:")
+    #         print(f"      Name: {first_file.name}")
+    #         print(f"      Size: {first_file.stat().st_size / (1024*1024):.2f} MB")
+    #         print(f"      Path: {first_file}")
+            
+    #         # Inspect schema before attempting to load
+    #         try:
+    #             import polars as pl
+    #             test_schema = pl.scan_parquet(str(first_file)).collect_schema()
+    #             available_cols = list(test_schema.keys())
+                
+    #             print(f"\n   📊 SCHEMA ANALYSIS:")
+    #             print(f"      Total columns in file: {len(available_cols)}")
+    #             print(f"      First 10 columns: {available_cols[:10]}")
+                
+    #             if columns:
+    #                 print(f"\n   🎯 COLUMN MATCHING:")
+    #                 print(f"      Requested columns: {len(columns)}")
+    #                 print(f"      VPHO_KEYS sample: {columns[:5]}...")
+                    
+    #                 # Detailed matching analysis
+    #                 matches = [c for c in columns if c in available_cols]
+    #                 missing = [c for c in columns if c not in available_cols]
+                    
+    #                 print(f"      Matches: {len(matches)}/{len(columns)} ({len(matches)/len(columns)*100:.1f}%)")
+    #                 print(f"      Missing columns: {missing[:10]}...")
+                    
+    #                 # Check if ANY of the expected column patterns exist
+    #                 print(f"\n   🔍 COLUMN PATTERN CHECK:")
+    #                 recoil_cols = [c for c in available_cols if 'recoil' in c.lower()]
+    #                 muon_cols = [c for c in available_cols if 'mu' in c.lower()]
+                    
+    #                 print(f"      Recoil-related columns: {recoil_cols[:5]}")
+    #                 print(f"      Muon-related columns: {muon_cols[:5]}")
+                    
+    #         except Exception as e:
+    #             print(f"   ❌ Schema inspection failed: {e}")
+            
+    #     for file_path in sorted(file_list):
+    #         try:
+    #             lf = pl.scan_parquet(str(file_path))
+                
+    #             # Schema validation on first file
+    #             if schema_info is None:
+    #                 available_cols = list(lf.collect_schema().keys())
+                    
+    #                 if columns:
+    #                     valid_cols = [col for col in columns if col in available_cols]
+    #                     if len(valid_cols) < len(columns) * 0.8:
+    #                         print(f"      ⚠️  Insufficient columns in {process_name}")
+    #                         return None
+    #                     schema_info = valid_cols
+    #                 else:
+    #                     schema_info = available_cols
+                
+    #             # Apply column selection
+    #             if columns and schema_info:
+    #                 lf = lf.select(schema_info)
+                
+    #             # Apply sampling
+    #             if sample_fraction:
+    #                 lf = lf.filter(pl.col('__event__').hash() % 100 < sample_fraction * 100)
+                
+    #             lazy_frames.append(lf)
+    #             files_loaded += 1
+                
+    #         except Exception as e:
+    #             warnings.warn(f"Skipping {file_path.name}: {e}")
+        
+    #     if not lazy_frames:
+    #         return None
+        
+        # # Create unified DataFrame
+        # memory_budget = self.config.memory_budget_gb / len(self._discover_process_directories(Path('.'), None))
+        
+        # df = UnifiedLazyDataFrame(
+        #     lazy_frames=lazy_frames,
+        #     memory_budget_gb=memory_budget,
+        #     required_columns=columns,
+        #     metadata={'process_name': process_name} 
+        # )
+        
+        # return df
+    
+    def load(self, base_dir: str, 
+             pattern: Optional[str] = None,
+             columns: Optional[List[str]] = None,
+             sample_fraction: Optional[float] = None) -> OptimizedUltraLazyDict:
+        """
+        Load particle data with directory-based aggregation following Belle II structure.
+        
+        Structure: base_dir/process_directory/*.parquet
+        Each immediate subdirectory of base_dir represents one process/dataset.
+        
+        Args:
+            base_dir: Base directory containing process subdirectories
+            pattern: Directory name pattern filter (e.g., '*data*', '*mumu*')
+            columns: Columns to load (None uses particle-specific defaults)
+            sample_fraction: Fraction of data to sample (for testing)
+            
+        Returns:
+            Enhanced OptimizedUltraLazyDict with particle-specific methods
+        """
+        # Determine columns to load
+        if columns is None:
+            columns = DEFAULT_KEYS_BY_PARTICLE.get(self.particle_type)
+            if columns:
+                print(f"   Using {len(columns)} default columns for {self.particle_type}")
+        
+        # Convert base_dir to Path
+        base_path = Path(base_dir)
+        if not base_path.exists():
+            raise FileNotFoundError(f"Base directory not found: {base_dir}")
+        
+        print(f"🔍 Loading {self.particle_type} data (Belle II directory structure)")
+        print(f"   📂 Base directory: {base_dir}")
+        if columns:
+            print(f"   📋 Target columns: {len(columns)} selected")
+        
+        # CRITICAL: Find immediate subdirectories only (not recursive)
+        process_directories = {}
+        directory_pattern = pattern or '*'
+        
+        for entry in base_path.iterdir():
+            if entry.is_dir() and entry.match(directory_pattern):
+                # Check if directory contains parquet files
+                parquet_files = list(entry.glob(f'*{self.particle_type}*.parquet'))
+                if parquet_files:
+                    process_directories[entry.name] = parquet_files
+                    print(f"   📁 Found process: {entry.name} ({len(parquet_files)} files)")
+        
+        if not process_directories:
+            raise FileNotFoundError(f"No process directories with parquet files found in {base_dir}")
+        
+        print(f"   📊 Total: {len(process_directories)} process directories")
+        
+        # Apply energy filtering BEFORE loading
+        filtered_directories = self._apply_energy_filtering(process_directories)
+        
+        if not filtered_directories:
+            raise ValueError(f"No directories passed energy condition filtering")
+        
+        # Load filtered directories
+        processes = self._load_directories_as_processes(filtered_directories, columns, sample_fraction)
+        
+        # Enhance with particle-specific methods
+        self._enhance_processes(processes)
+        
+        # Group processes by physics type
+        self._organize_process_groups(processes)
+        
+        # Validate
+        self._validate_loaded_data(processes)
+        
+        print(f"✅ Successfully loaded {len(processes)} processes")
+        
+        return processes
+    
+    def _load_directories_as_processes(self, process_directories: Dict[str, List[Path]], 
+                                      columns: Optional[List[str]],
+                                      sample_fraction: Optional[float]) -> OptimizedUltraLazyDict:
+        """Load each directory as a single process with proper aggregation."""
+        processes = OptimizedUltraLazyDict(memory_budget_gb=self.config.memory_budget_gb)
+        
+        for process_name, file_list in process_directories.items():
+            try:
+                print(f"\n   Loading {process_name}...")
+                
+                # Create lazy frames for all files in directory
+                lazy_frames = []
+                schema_info = None
+                files_loaded = 0
+                print(f"      Files to process: ",file_list)
+                for file_path in sorted(file_list):  # Sort for reproducibility
+                    try:
+                        lf = pl.scan_parquet(str(file_path))
+                        
+                        # Schema validation on first successful file
+                        if schema_info is None:
+                            available_schema = lf.collect_schema()
+                            available_cols = list(available_schema.keys())
+                            
+                            if columns:
+                                # Check column availability
+                                valid_cols = [col for col in columns if col in available_cols]
+                                missing_cols = [col for col in columns if col not in available_cols]
+                                
+                                if len(valid_cols) < len(columns) * 0.8:  # Require 80% columns
+                                    print(f"      ⚠️  Insufficient columns: {len(valid_cols)}/{len(columns)}")
+                                    print(f"      Missing: {missing_cols[:10]}...")
+                                    break
+                                
+                                schema_info = valid_cols
+                            else:
+                                schema_info = available_cols
+                            
+                            print(f"      ✓ Schema validated: {len(schema_info)} columns")
+                        
+                        # Apply column selection
+                        if columns and schema_info:
+                            lf = lf.select(schema_info)
+                        
+                        # Apply sampling if requested
+                        if sample_fraction:
+                            lf = lf.filter(pl.col('__event__').hash() % 100 < sample_fraction * 100)
+                        
+                        lazy_frames.append(lf)
+                        files_loaded += 1
+                        
+                    except Exception as e:
+                        print(f"      ⚠️  Skipping {file_path.name}: {str(e)[:50]}...")
+                
+                # Create unified DataFrame if we have valid frames
+                if lazy_frames:
+                    print(f"      ✓ Aggregating {files_loaded} files into unified DataFrame")
+                    
+                    df = UnifiedLazyDataFrame(
+                        lazy_frames=lazy_frames,
+                        memory_budget_gb=self.config.memory_budget_gb / len(process_directories),
+                        required_columns=columns,
+                        metadata={'process_name': process_name}  # Tag with process name
+                    )
+                    
+                    processes.add_process(process_name, df)
+                    print(f"      ✅ {process_name}: Successfully loaded")
+                else:
+                    print(f"      ❌ {process_name}: No valid files loaded")
+                    
+            except Exception as e:
+                print(f"      ❌ {process_name}: Loading failed - {e}")
+                warnings.warn(f"Failed to load process {process_name}: {e}")
+        
+        return processes
+    
+    def _organize_process_groups(self, processes: OptimizedUltraLazyDict):
+        """Organize processes into physics groups based on directory names."""
+        # Physics group patterns
+        group_patterns = {
+            'data': ['data', 'proc', 'prompt'],
+            'mumu': ['mumu', 'mu+mu-', 'muon'],
+            'ee': ['ee', 'e+e-', 'electron', 'bhabha'],
+            'taupair': ['taupair', 'tau', 'tautau'],
+            'qqbar': ['uubar', 'ddbar', 'ssbar', 'ccbar', 'qqbar', 'continuum'],
+            'BBbar': ['bbbar', 'bb_', 'charged', 'mixed', 'b+b-', 'b0b0'],
+            'gg': ['gg', 'gamma', 'photon'],
+            'hhISR': ['hhisr', 'hh_isr', 'hadron_isr'],
+            'llYY': ['llxx', 'llyy', 'four_lepton', 'eeee', 'eemumu']
+        }
+        
+        # Clear existing groups
+        processes._groups.clear()
+        
+        # Classify each process
+        for process_name in processes.keys():
+            name_lower = process_name.lower()
+            classified = False
+            
+            # Check each group pattern
+            for group_name, patterns in group_patterns.items():
+                if any(pattern in name_lower for pattern in patterns):
+                    processes.add_group(group_name, [process_name])
+                    classified = True
+                    break
+            
+            # Default to 'other' group if not classified
+            if not classified:
+                processes.add_group('other', [process_name])
+        
+        # Report group statistics
+        print(f"   📊 Process groups:")
+        for group_name, members in processes._groups.items():
+            if members:
+                print(f"      {group_name}: {len(members)} processes")
+    
+
+    
+    def _apply_energy_filtering(self, process_directories: Dict[str, List[Path]]) -> Dict[str, List[Path]]:
+        """Apply sophisticated energy condition filtering at directory level."""
+        # Energy filtering patterns matching reference implementation
+        energy_patterns = {
+            'vpho': {  # Default patterns for vpho
+                '5S_scan': {
+                    'include': ['5s', 'mc5s', 'data5s', 'scan5s', 'scan_5s', 'mc-5s', 'data-5s'],
+                    'exclude': ['off', '4s', 'off_resonance', 'offres']
+                },
+                '4S_on': {
+                    'include': ['4s', 'mc4s', 'data4s', 'on_resonance', 'onres', 'mc-4s', 'data-4s'],
+                    'exclude': ['off', '5s', 'scan', 'off_resonance']
+                },
+                '4S_offres': {
+                    'include': ['off', 'mcoff', 'dataoff', 'off_resonance', 'offres'],
+                    'exclude': ['5s', 'on_resonance', 'onres', '4s_on']
+                }
+            },
+            'gamma': {  # Can have different patterns for different particles
+                '5S_scan': {
+                    'include': ['5s', 'scan'],
+                    'exclude': ['off', '4s']
+                },
+                '4S_on': {
+                    'include': ['4s', 'on'],
+                    'exclude': ['off', '5s']
+                },
+                '4S_offres': {
+                    'include': ['off'],
+                    'exclude': ['5s', 'on']
+                }
+            }
+        }
+        
+        # Get patterns for current particle type and energy condition
+        particle_patterns = energy_patterns.get(self.particle_type, energy_patterns['vpho'])
+        
+        # Extract energy condition from config
+        energy_condition = getattr(self.config, 'energy_condition', None)
+        if not energy_condition:
+            print("   ℹ️  No energy condition specified, loading all directories")
+            return process_directories
+        
+        patterns = particle_patterns.get(energy_condition)
+        if not patterns:
+            warnings.warn(f"No filtering patterns for {energy_condition}, returning all")
+            return process_directories
+        
+        filtered = {}
+        
+        print(f"\n   🔍 Applying {energy_condition} energy filtering")
+        print(f"      Include patterns: {patterns['include']}")
+        print(f"      Exclude patterns: {patterns['exclude']}")
+        
+        for dir_name, files in process_directories.items():
+            name_lower = dir_name.lower()
+            
+            # Check inclusion criteria
+            include_match = False
+            if patterns['include']:
+                include_match = any(pattern in name_lower for pattern in patterns['include'])
+            else:
+                include_match = True  # Include all if no inclusion patterns
+            
+            # Check exclusion criteria
+            exclude_match = False
+            if patterns['exclude']:
+                exclude_match = any(pattern in name_lower for pattern in patterns['exclude'])
+            
+            # Apply filtering logic
+            if include_match and not exclude_match:
+                filtered[dir_name] = files
+                print(f"      ✓ Accepted: {dir_name}")
+            else:
+                reason = "excluded" if exclude_match else "not included"
+                print(f"      ✗ Filtered out: {dir_name} ({reason})")
+        
+        print(f"\n   📊 Filtering result: {len(filtered)}/{len(process_directories)} directories kept")
+        
+        return filtered
+    
+    def _enhance_processes(self, processes: OptimizedUltraLazyDict):
+        """Enhance with particle-specific methods."""
+        injector = self._method_injectors.get(self.particle_type)
+        
+        if injector:
+            for name, df in processes.items():
+                if hasattr(df, '__class__'):
+                    injector(df.__class__)
+    
+    def _inject_photon_methods(self, dataframe_class):
+        """Enhanced photon methods with validation."""
+        
+        def angular_separation(self) -> 'LazyColumnAccessor':
+            """Compute angular separation with validation."""
+            # Validate required columns
+            required = ['pRecoil', 'pRecoilTheta', 'pRecoilPhi', 'E', 'theta', 'phi']
+            if hasattr(self, 'columns'):
+                missing = [col for col in required if col not in self.columns]
+                if missing:
+                    raise ValueError(f"Missing columns for angular separation: {missing}")
+            
+            # Create lazy column with computation
+            from layer2_unified_lazy_dataframe import LazyColumnAccessor
+            
+            # Define computation
+            def compute_angular(df):
+                # Vectorized computation
+                cos_theta_recoil = np.cos(df['pRecoilTheta'])
+                sin_theta_recoil = np.sin(df['pRecoilTheta'])
+                cos_phi_recoil = np.cos(df['pRecoilPhi'])
+                sin_phi_recoil = np.sin(df['pRecoilPhi'])
+                
+                cos_theta = np.cos(df['theta'])
+                sin_theta = np.sin(df['theta'])
+                cos_phi = np.cos(df['phi'])
+                sin_phi = np.sin(df['phi'])
+                
+                # Dot product
+                dot = (sin_theta_recoil * cos_phi_recoil * sin_theta * cos_phi +
+                      sin_theta_recoil * sin_phi_recoil * sin_theta * sin_phi +
+                      cos_theta_recoil * cos_theta)
+                
+                return np.arccos(np.clip(dot, -1, 1))  # Clip for numerical stability
+            
+            # Create new DataFrame with angular separation
+            new_df = self.with_columns(
+                pl.col('pRecoil').apply(lambda x: compute_angular(self)).alias('angular_separation')
+            )
+            
+            return new_df['angular_separation']
+        
+        def select_best_photon(self, nan_fill: float = 4.0,
+                             energy_cut: float = 0.075) -> 'UnifiedLazyDataFrame':
+            """Select best photon with configurable cuts."""
+            # Polars expression for angular separation
+            angular_expr = (
+                (pl.col('pRecoil') * pl.col('pRecoilTheta').sin() * pl.col('pRecoilPhi').cos() * 
+                 pl.col('E') * pl.col('theta').sin() * pl.col('phi').cos() +
+                 pl.col('pRecoil') * pl.col('pRecoilTheta').sin() * pl.col('pRecoilPhi').sin() * 
+                 pl.col('E') * pl.col('theta').sin() * pl.col('phi').sin() +
+                 pl.col('pRecoil') * pl.col('pRecoilTheta').cos() * 
+                 pl.col('E') * pl.col('theta').cos()) /
+                (pl.col('pRecoil') * pl.col('E'))
+            ).arccos().fill_nan(nan_fill).alias('angular_separation')
+            
+            # Add angular separation
+            with_angular = self.with_columns(angular_expr)
+            
+            # Group and select best
+            group_cols = ['__experiment__', '__run__', '__event__', '__production__']
+            best = with_angular.sort('angular_separation').group_by(group_cols).first()
+            
+            # Add E/pRecoil and apply cuts
+            return (best
+                    .with_columns((pl.col('E') / pl.col('pRecoil')).fill_nan(0).alias('EoPRecoil'))
+                    .filter((pl.col('E') > energy_cut) | pl.col('E').is_null()))
+        
+        # Inject methods
+        dataframe_class.angular_separation = angular_separation
+        dataframe_class.select_best_photon = select_best_photon
+    
+    def _inject_electron_methods(self, dataframe_class):
+        """Electron identification methods."""
+        
+        def electron_id_score(self, weights: Optional[Dict[str, float]] = None) -> 'LazyColumnAccessor':
+            """Compute electron ID score from multiple variables."""
+            # Default weights if not provided
+            if weights is None:
+                weights = {
+                    'E_over_p': 0.3,
+                    'shower_shape': 0.2,
+                    'track_match': 0.3,
+                    'dE_dx': 0.2
+                }
+            
+            # Check which variables are available
+            available_weights = {}
+            for var, weight in weights.items():
+                if hasattr(self, 'columns') and var in self.columns:
+                    available_weights[var] = weight
+            
+            if not available_weights:
+                raise ValueError("No electron ID variables found in data")
+            
+            # Build weighted score
+            score_expr = sum(
+                pl.col(var) * weight 
+                for var, weight in available_weights.items()
+            ).alias('electron_id_score')
+            
+            return self.with_columns(score_expr)['electron_id_score']
+        
+        dataframe_class.electron_id_score = electron_id_score
+    
+    def _inject_muon_methods(self, dataframe_class):
+        """Muon identification methods."""
+        
+        def muon_id_score(self) -> 'LazyColumnAccessor':
+            """Compute muon ID score."""
+            # Check available columns
+            score_components = []
+            
+            if hasattr(self, 'columns'):
+                if 'klm_layers_hit' in self.columns:
+                    score_components.append(pl.col('klm_layers_hit') / 14.0 * 0.5)
+                if 'momentum' in self.columns:
+                    score_components.append(pl.col('momentum') / 10.0 * 0.5)
+                elif 'mu1P' in self.columns and 'mu2P' in self.columns:
+                    # Use muon momentum if available
+                    score_components.append((pl.col('mu1P') + pl.col('mu2P')) / 20.0 * 0.5)
+            
+            if not score_components:
+                raise ValueError("No muon ID variables found in data")
+            
+            score_expr = sum(score_components).alias('muon_id_score')
+            return self.with_columns(score_expr)['muon_id_score']
+        
+        dataframe_class.muon_id_score = muon_id_score
+    
+    def _validate_loaded_data(self, processes: OptimizedUltraLazyDict):
+        """Validate loaded data integrity."""
+        is_valid, issues = processes.validate_integrity()
+        
+        if not is_valid:
+            print(f"⚠️ Validation issues found:")
+            for issue in issues[:5]:  # Show first 5 issues
+                print(f"   - {issue}")
+            
+            if self.config.error_resilience_level == 'low':
+                raise ValueError(f"Data validation failed: {len(issues)} issues")
+
+# ============================================================================
+# MAIN PRODUCTION FRAMEWORK (with luminosity weighting integration)
+# ============================================================================
+
+class Belle2ProductionFramework(Belle2Layer2Framework):
+    """
+    Production-ready Belle II analysis framework with integrated luminosity weighting.
+    
+    This properly extends Layer2 framework without reimplementing existing functionality.
+    
+    Key features:
+    - Full Layer2 integration (uses existing optimizers)
+    - Particle-specific loading with default columns
+    - Progressive analysis patterns
+    - Natural API design
+    - Automatic luminosity weighting for data/MC comparisons
+    """
+    
+    def __init__(self, config: Optional[FrameworkConfig] = None):
+        self.config = config or FrameworkConfig()
+        
+        # Initialize base with Layer2 framework
+        super().__init__(
+            memory_budget_gb=self.config.memory_budget_gb,
+            enable_cpp_acceleration=self.config.enable_cpp_acceleration,
+            cache_dir=str(self.config.cache_dir)
+        )
+        
+        # Components (don't duplicate what Layer2 already has)
+        self.particle_loader = None
+        self.progressive_analyzer = None
+        self._performance_monitor = PerformanceMonitor()
+        
+        print(f"""
+        ╔════════════════════════════════════════════════════╗
+        ║     Belle II Enhanced Production Framework         ║
+        ║              Version 2.1 with Weighting            ║
+        ║                                                    ║
+        ║  Memory: {self.config.memory_budget_gb:>5.1f} GB                              ║
+        ║  C++ Acceleration: {'✓' if self.config.enable_cpp_acceleration else '✗'}                        ║
+        ║  Adaptive Chunking: {'✓' if self.config.enable_adaptive_chunking else '✗'}                       ║
+        ║  Parallel Stages: {'✓' if self.config.parallel_stages else '✗'}                         ║
+        ║  Error Resilience: {self.config.error_resilience_level:>8}                    ║
+        ║  Energy Condition: {self.config.energy_condition:>8}                    ║
+        ║  Luminosity Weighting: {'✓' if self.config.apply_luminosity_weights else '✗'}                    ║
+        ╚════════════════════════════════════════════════════╝
+        """)
+    
+    def load_particle_data(self, base_dir: str, 
+                          particle: str = 'vpho',
+                          columns: Optional[List[str]] = None,
+                          sample_fraction: Optional[float] = None) -> OptimizedUltraLazyDict:
+        """
+        Load particle data with automatic column selection.
+        
+        Uses Layer2's native loading with particle-specific defaults.
+        """
+        with self._performance_monitor.track("data_loading"):
+            # Create loader with config
+            self.particle_loader = ParticleDataLoader(particle, self.config)
+            
+            # Load with automatic column selection
+            processes = self.particle_loader.load(
+                base_dir, 
+                columns=columns,  # Will use particle defaults if None
+                sample_fraction=sample_fraction
+            )
+            
+            # DON'T enhance with custom histogram - Layer2 already has streaming!
+            # Just return the processes as-is
+            return processes
+    
+    def run_progressive_analysis(self, processes: OptimizedUltraLazyDict,
+                               variable: str,
+                               bins: int = 100,
+                               range: Optional[Tuple[float, float]] = None,
+                               cuts: Optional[List[str]] = None,
+                               stages: Optional[List[str]] = None,
+                               output_dir: str = './belle2_analysis') -> Dict[str, Any]:
+        """Run progressive analysis using Layer2 optimization with luminosity weighting."""
+        with self._performance_monitor.track("progressive_analysis"):
+            # Create analyzer with config that includes energy condition
+            self.progressive_analyzer = EnhancedProgressiveAnalysis(
+                processes, self.config
+            )
+            
+            # Run analysis - weights will be automatically applied
+            results = self.progressive_analyzer.run_analysis(
+                variable=variable,
+                bins=bins,
+                range=range,
+                cuts=cuts,
+                stages=stages,
+                output_dir=output_dir
+            )
+            
+            # Add performance data
+            results['performance'] = self._performance_monitor.get_report()
+            
+            # Add Layer2 optimization report
+            results['layer2_optimization'] = self.optimizers.get_optimization_report()
+            
+            return results
+    
+    def quick_photon_analysis(self, data_path: str,
+                            cuts: List[str],
+                            variables: List[str] = ['EoPRecoil', 'angular_separation'],
+                            output_dir: str = './photon_analysis') -> Dict[str, Any]:
+        """
+        Complete photon analysis workflow with luminosity weighting.
+        
+        Uses Layer2's native capabilities for all operations.
+        """
+        # Load gamma data with default columns
+        processes = self.load_particle_data(data_path, particle='gamma')
+        
+        # Run analysis for each variable
+        all_results = {}
+        
+        for variable in variables:
+            results = self.run_progressive_analysis(
+                processes,
+                variable=variable,
+                bins=100,
+                range=(0, 2) if variable == 'EoPRecoil' else None,
+                cuts=cuts,
+                stages=['baseline', 'candidates', 'cuts', 'photon', 'efficiency'],
+                output_dir=f"{output_dir}/{variable}"
+            )
+            all_results[variable] = results
+        
+        # Combined report
+        all_results['combined_report'] = self._generate_combined_report(all_results)
+        
+        return all_results
+    
+    def compute_histogram_optimized(self, data: Union[UnifiedLazyDataFrame, OptimizedUltraLazyDict],
+                                  variable: str, **kwargs) -> Union[Tuple[np.ndarray, np.ndarray], Dict]:
+        """
+        Compute histogram using Layer2's optimized execution.
+        
+        This properly leverages layer2_optimizers instead of reimplementing.
+        """
+        # Use Layer2's optimization infrastructure
+        if isinstance(data, UnifiedLazyDataFrame):
+            # For single DataFrame, use native hist which already has streaming
+            return data.hist(variable, **kwargs)
+        
+        elif isinstance(data, (OptimizedUltraLazyDict, BroadcastResult)):
+            # For dictionary/broadcast, use native hist which handles parallelization
+            return data.hist(variable, **kwargs)
+        
+        else:
+            raise TypeError(f"Unsupported data type: {type(data)}")
+    
+    def _generate_combined_report(self, all_results: Dict[str, Dict]) -> str:
+        """Generate combined analysis report."""
+        report = "# Combined Photon Analysis Report\n\n"
+        report += f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        # Summary statistics
+        total_events = 0
+        total_time = 0
+        
+        for variable, results in all_results.items():
+            if isinstance(results, dict) and 'statistics' in results:
+                for stage, stats in results['statistics'].items():
+                    total_events += stats.get('total_events', 0)
+                
+                if 'metadata' in results:
+                    total_time += results['metadata'].get('total_time', 0)
+        
+        report += f"## Summary\n"
+        report += f"- Total Events Processed: {total_events:,}\n"
+        report += f"- Total Analysis Time: {total_time:.2f}s\n"
+        report += f"- Throughput: {total_events/total_time/1e6:.2f}M events/s\n\n"
+        
+        # Individual reports
+        for variable, results in all_results.items():
+            if isinstance(results, dict) and 'report' in results:
+                report += f"\n## Variable: {variable}\n"
+                report += results['report']
+                report += "\n" + "-" * 80 + "\n"
+        
+        return report
+    
+    def validate_analysis_setup(self, processes: OptimizedUltraLazyDict,
+                              required_columns: List[str]) -> Tuple[bool, List[str]]:
+        """Validate that all required columns are present."""
+        issues = []
+        
+        # Check each process
+        for name, df in processes.items():
+            if hasattr(df, 'columns'):
+                missing = [col for col in required_columns if col not in df.columns]
+                if missing:
+                    issues.append(f"{name}: Missing columns {missing}")
+        
+        return len(issues) == 0, issues
+
+# ============================================================================
+# PERFORMANCE MONITORING (unchanged from original)
+# ============================================================================
+
+class PerformanceMonitor:
+    """Simple performance monitoring utility."""
+    
+    def __init__(self):
+        self._timings = defaultdict(list)
+        self._memory = defaultdict(list)
+    
+    @contextmanager
+    def track(self, operation: str):
+        """Track operation performance."""
+        start_time = time.time()
+        start_memory = self._get_memory_usage()
+        
+        try:
+            yield
+        finally:
+            elapsed = time.time() - start_time
+            memory_used = self._get_memory_usage() - start_memory
+            
+            self._timings[operation].append(elapsed)
+            self._memory[operation].append(memory_used)
+    
+    def _get_memory_usage(self) -> int:
+        """Get current memory usage."""
+        try:
+            import psutil
+            return psutil.Process().memory_info().rss
+        except:
+            return 0
+    
+    def get_report(self) -> Dict[str, Any]:
+        """Get performance report."""
+        report = {}
+        
+        for operation in self._timings:
+            times = self._timings[operation]
+            memory = self._memory[operation]
+            
+            report[operation] = {
+                'count': len(times),
+                'total_time': sum(times),
+                'avg_time': sum(times) / len(times) if times else 0,
+                'max_memory_mb': max(memory) / 1e6 if memory else 0
+            }
+        
+        return report
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS
+# ============================================================================
+
+def create_belle2_framework(**kwargs) -> Belle2ProductionFramework:
+    """Create framework with configuration."""
+    config = FrameworkConfig(**kwargs)
+    return Belle2ProductionFramework(config)
+
+def quick_analysis(data_path: str, 
+                  variable: str = 'pRecoil',
+                  cuts: Optional[List[str]] = None,
+                  particle: str = 'vpho',
+                  energy_condition: str = '5S_scan',
+                  **kwargs) -> Dict[str, Any]:
+    """Quick analysis with defaults including energy condition."""
+    framework = create_belle2_framework(energy_condition=energy_condition, **kwargs)
+    processes = framework.load_particle_data(data_path, particle=particle)
+    
+    return framework.run_progressive_analysis(
+        processes,
+        variable=variable,
+        cuts=cuts,
+        output_dir=f'./analysis_{variable}_{particle}_{energy_condition}'
+    )
+
+# ============================================================================
+# FLUENT INTERFACE
+# ============================================================================
+
+class AnalysisChain:
+    """Fluent interface for analysis."""
+    
+    def __init__(self, framework: Belle2ProductionFramework):
+        self.framework = framework
+        self.data = None
+        self.cuts = []
+        self.results = {}
+    
+    def load(self, path: str, particle: str = 'vpho') -> 'AnalysisChain':
+        self.data = self.framework.load_particle_data(path, particle)
+        return self
+    
+    def cut(self, expression: str) -> 'AnalysisChain':
+        self.cuts.append(expression)
+        return self
+    
+    def hist(self, variable: str, **kwargs) -> 'AnalysisChain':
+        if self.data:
+            data = self.data
+            for cut in self.cuts:
+                data = data.query(cut)
+            self.results[f'hist_{variable}'] = data.hist(variable, **kwargs)
+        return self
+    
+    def analyze(self, variable: str, **kwargs) -> 'AnalysisChain':
+        if self.data:
+            result = self.framework.run_progressive_analysis(
+                self.data, variable, cuts=self.cuts, **kwargs
+            )
+            self.results[f'analysis_{variable}'] = result
+        return self
+    
+    def get(self) -> Dict[str, Any]:
+        return self.results
+
+# ============================================================================
+# MODULE EXPORTS
+# ============================================================================
+
+__all__ = [
+    # Framework
+    'Belle2ProductionFramework',
+    'create_belle2_framework',
+    'FrameworkConfig',
+    
+    # Components
+    'EnhancedLuminosityManager',
+    'EnhancedProgressiveAnalysis',
+    'ParticleDataLoader',
+    
+    # Utilities
+    'quick_analysis',
+    'AnalysisChain',
+    'PerformanceMonitor',
+    
+    # Re-exports
+    'OptimizedUltraLazyDict',
+    'UnifiedLazyDataFrame',
+    'BroadcastResult'
+]

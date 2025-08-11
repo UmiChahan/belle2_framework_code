@@ -1,0 +1,4 @@
+# file: /gpfs/group/belle2/users2022/kyldem/photoneff_updated/optimized_cpp_integration.py
+# hypothesis_version: 6.136.4
+
+[0.0, 0.001, 0.003, 0.01, 0.05, 0.1, 0.75, 1.0, 5.2, 5.279, 5.3, 100, 256, 300, 1000, 1024, 1000000, 5000000, 10000000, 50000000, '-inf', '64M', '=', 'FALSE', 'M_bc', 'OMP_DYNAMIC', 'OMP_NUM_THREADS', 'OMP_SCHEDULE', 'OMP_STACKSIZE', '__main__', 'chunked_cpp', 'count', 'delta_E', 'estimated_rows', 'inf', 'max_val', 'min_val', 'null_ratio', 'nulls', 'num_frames', 'parallel_cpp', 'polars_fallback', 'rows_per_frame', 'static', 'streaming']

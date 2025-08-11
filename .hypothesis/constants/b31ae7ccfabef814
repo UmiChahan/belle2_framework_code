@@ -1,0 +1,4 @@
+# file: /gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_project/layer1/integration_layer.py
+# hypothesis_version: 6.136.4
+
+[0.1, 1.2, 1.3, 1.5, 2.0, 8.0, 15.0, 16.0, 32.0, 1024, 1000000, 10000000, 100000000, 1000000000, '\nBenefits:', '-', '/path/to/data', '=', 'EnhancedBlazingCore', 'T', '__main__', '__name__', 'agg', 'auto', 'billion', 'counts', 'edges', 'engine_usage', 'inf', 'join', 'lambda', 'last_operations', 'lazy', 'materialize_failure', 'materialize_success', 'operation_count', 'query', 'transform', 'value', 'value > 100', 'x']
