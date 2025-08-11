@@ -1,0 +1,11 @@
+# Python test artifacts
+.hypothesis/
+.pytest_cache/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Virtual envs (adjust to your name)
+.venv/
+venv/
