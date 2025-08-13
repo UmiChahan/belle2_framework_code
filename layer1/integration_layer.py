@@ -26,9 +26,9 @@ import warnings
 from layer0 import ComputeCapability
 # ============================================================================
 # Import our new engines
-from layer1.lazy_compute_engine import LazyComputeEngine, LazyComputeCapability
+from layer1.lazy_compute_engine import LazyComputeEngine
 from layer1.billion_capable_engine import (
-    IntegratedBillionCapableEngine, BillionRowCapability, ChunkStrategy
+    IntegratedBillionCapableEngine
 )
 
 # Import existing framework components
@@ -44,7 +44,6 @@ try:
         BillionCapableFramework,
         BillionCapableBlazingCore,
         UnifiedAPI,
-        SmartEvaluator
     )
     FRAMEWORK_AVAILABLE = True
 except ImportError as e:

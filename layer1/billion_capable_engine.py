@@ -50,8 +50,7 @@ from layer1.lazy_compute_engine import (
     ExecutionContext, AdaptiveMemoryEstimator, SmartCacheManager, LazyGraphExecutor
 )
 from layer0 import (
-    ComputeCapability, ComputeNode, ComputeOpType,
-    DistributedComputeCapability
+    ComputeCapability, ComputeOpType,
 )
 from memory_pool_optimization import ObjectPool, get_memory_pool
 

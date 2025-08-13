@@ -41,11 +41,10 @@ if str(parent_dir) not in sys.path:
 
 # Import Layer 0 and Layer 1 components
 from layer0 import (
-    ComputeCapability, ComputeNode, ComputeOpType,
-    MemoryAwareCompute
+    ComputeCapability, ComputeOpType
 )
 from layer1.lazy_compute_engine import (
-    GraphNode, ExecutionContext, AdaptiveMemoryEstimator
+    GraphNode
 )
 
 T = TypeVar('T')

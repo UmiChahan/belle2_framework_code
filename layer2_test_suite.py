@@ -32,9 +32,7 @@ from hypothesis.extra.numpy import arrays
 
 # Import Layer 2 components
 from layer2_unified_lazy_dataframe import (
-    UnifiedLazyDataFrame, LazyColumnAccessor, LazyGroupBy,
-    TransformationMetadata, DataTransformationChain,
-    create_dataframe_from_parquet, create_dataframe_from_compute
+    UnifiedLazyDataFrame, LazyColumnAccessor
 )
 from layer2_optimized_ultra_lazy_dict import (
     OptimizedUltraLazyDict, LazyGroupProxy, BroadcastResult,
@@ -42,8 +40,7 @@ from layer2_optimized_ultra_lazy_dict import (
 )
 from layer2_materialization_controller import (
     MaterializationController, MaterializationFormat, MaterializationHints,
-    GraphOptimizationEngine, MemoryAwareExecutor, PerformanceProfiler,
-    PredicatePushdownRule, ColumnPruningRule, layer2_optimizers
+    GraphOptimizationEngine, MemoryAwareExecutor
 )
 from layer2_complete_integration import Belle2Layer2Framework
 

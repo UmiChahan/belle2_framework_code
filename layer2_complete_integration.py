@@ -28,7 +28,6 @@ from layer2_unified_lazy_dataframe import (
     UnifiedLazyDataFrame,
     LazyColumnAccessor,
     LazyGroupBy,
-    TransformationMetadata,
     create_dataframe_from_parquet,
     create_dataframe_from_compute
 )
@@ -37,14 +36,11 @@ from layer2_optimized_ultra_lazy_dict import (
     OptimizedUltraLazyDict,
     LazyGroupProxy,
     BroadcastResult,
-    ProcessMetadata,
     create_process_dict_from_directory
 )
 
 from layer2_materialization_controller import (
     MaterializationController,
-    MaterializationFormat,
-    MaterializationHints,
     GraphOptimizationEngine,
     MemoryAwareExecutor,
     PerformanceProfiler,

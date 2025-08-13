@@ -41,16 +41,7 @@ parent_dir = Path(__file__).parent.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
-# Import Layer 0 protocols
-from layer0 import (
-    ComputeCapability, ComputeEngine, ComputeNode, ComputeOpType
-)
 
-# Import Layer 1 engines
-from layer1.lazy_compute_engine import (
-    LazyComputeEngine, LazyComputeCapability, GraphNode
-)
-from layer1.billion_capable_engine import IntegratedBillionCapableEngine
 from layer1.integration_layer import EngineSelector, ComputeEngineAdapter
 
 # Import our UnifiedLazyDataFrame

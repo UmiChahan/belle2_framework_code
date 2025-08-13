@@ -294,7 +294,131 @@ class Materializer(Protocol[T]):
     @abstractmethod
     def to_dict(self) -> Dict[str, Any]:
         ...
+@runtime_checkable
+class ComputeEngine(Protocol):
+    """CRITICAL MISSING: Core compute execution engine interface.
+    
+    Layer1 expects this as the fundamental abstraction for compute execution.
+    """
+    
+    @abstractmethod
+    def execute_capability(self, capability: ComputeCapability[T]) -> T:
+        """Execute compute capability and return materialized result."""
+        ...
+    
+    @abstractmethod
+    def estimate_execution_cost(self, capability: ComputeCapability) -> float:
+        """Estimate computational cost for planning."""
+        ...
+    
+    @abstractmethod
+    def optimize_graph(self, graph: ComputeNode) -> ComputeNode:
+        """Optimize compute graph before execution."""
+        ...
+    
+    @abstractmethod
+    def get_memory_usage(self) -> int:
+        """Current memory usage in bytes."""
+        ...
+    
+    @abstractmethod
+    def configure_memory_budget(self, budget_bytes: int) -> None:
+        """Configure memory constraints."""
+        ...
 
+@runtime_checkable
+class LazyEvaluationSemantics(Protocol):
+    """CRITICAL MISSING: Defines when and how to evaluate lazy computations."""
+    
+    @abstractmethod
+    def should_materialize(self, capability: ComputeCapability) -> bool:
+        """Determine if capability should be materialized immediately."""
+        ...
+    
+    @abstractmethod
+    def get_evaluation_strategy(self, graph: ComputeNode) -> str:
+        """Return 'eager', 'lazy', or 'streaming' strategy."""
+        ...
+    
+    @abstractmethod
+    def can_fuse_operations(self, op1: ComputeNode, op2: ComputeNode) -> bool:
+        """Check if operations can be fused for optimization."""
+        ...
+
+@runtime_checkable
+class OperationComposer(Protocol):
+    """CRITICAL MISSING: Compositional operation building interface."""
+    
+    @abstractmethod
+    def compose_sequential(self, ops: List[ComputeNode]) -> ComputeNode:
+        """Chain operations sequentially."""
+        ...
+    
+    @abstractmethod
+    def compose_parallel(self, ops: List[ComputeNode]) -> ComputeNode:
+        """Execute operations in parallel."""
+        ...
+    
+    @abstractmethod
+    def create_join(self, left: ComputeNode, right: ComputeNode, 
+                   join_key: str, join_type: str = 'inner') -> ComputeNode:
+        """Create join operation."""
+        ...
+
+@runtime_checkable
+class ComputeOptimizer(Protocol):
+    """CRITICAL MISSING: Graph optimization interface."""
+    
+    @abstractmethod
+    def optimize_graph(self, graph: ComputeNode) -> ComputeNode:
+        """Optimize compute graph for performance."""
+        ...
+    
+    @abstractmethod
+    def estimate_optimization_benefit(self, original: ComputeNode, 
+                                    optimized: ComputeNode) -> float:
+        """Estimate performance improvement ratio."""
+        ...
+
+@dataclass
+class ComputeContract:
+    """CRITICAL MISSING: Execution contract specification."""
+    memory_budget: int
+    timeout_seconds: Optional[float] = None
+    quality_level: str = 'high'  # 'low', 'medium', 'high'
+    allow_approximation: bool = False
+    max_cpu_cores: Optional[int] = None
+    allow_spilling: bool = True
+    enable_optimization: bool = True
+    
+    def validate(self) -> bool:
+        """Validate contract constraints."""
+        return (self.memory_budget > 0 and 
+                (self.timeout_seconds is None or self.timeout_seconds > 0))
+
+@runtime_checkable
+class MemoryAwareCompute(Protocol):
+    """CRITICAL MISSING: Standardized memory management interface."""
+    
+    @abstractmethod
+    def get_memory_usage(self) -> int:
+        """Current memory usage in bytes."""
+        ...
+    
+    @abstractmethod
+    def get_memory_budget(self) -> int:
+        """Configured memory budget in bytes."""
+        ...
+    
+    @abstractmethod
+    def configure_memory_budget(self, budget_bytes: int) -> None:
+        """Configure memory budget."""
+        ...
+    
+    @abstractmethod
+    def estimate_memory_usage(self, operation: ComputeNode) -> int:
+        """Estimate memory usage for operation."""
+        ...
 # ==============================================================================
 # CONCRETE COMPUTE CAPABILITY IMPLEMENTATION
 # ==============================================================================
@@ -1565,6 +1689,14 @@ __all__ = [
     
     # Exceptions
     'ComputeExecutionError',
+
+    # Missing protocols now available
+    'ComputeEngine',
+    'LazyEvaluationSemantics', 
+    'OperationComposer',
+    'ComputeOptimizer',
+    'ComputeContract',
+    'MemoryAwareCompute',
 ]
 
 # Version information

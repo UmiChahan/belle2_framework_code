@@ -31,7 +31,7 @@ from functools import lru_cache, cached_property, wraps
 from pathlib import Path
 from typing import (
     Any, Dict, List, Optional, Union, Iterator, Callable, 
-    TypeVar, Generic, Protocol, runtime_checkable, Tuple, Set,
+    TypeVar, Generic, Protocol, runtime_checkable, Tuple, Set,List,
     TYPE_CHECKING
 )
 import numpy as np
@@ -47,22 +47,16 @@ if str(parent_dir) not in sys.path:
 
 # Import Layer 0 protocols
 from layer0 import (
-    ComputeCapability, ComputeEngine, ComputeNode, ComputeOpType,
-    LazyEvaluationSemantics, OperationComposer, ComputeOptimizer,
-    Materializer, ComputeContract, MemoryAwareCompute
+    ComputeCapability, ComputeOpType,
 )
 
 # Import Layer 1 engines
 from layer1.lazy_compute_engine import (
-    LazyComputeEngine, LazyComputeCapability, GraphNode,
-    ExecutionContext, AdaptiveMemoryEstimator, LazyFrameMetadataHandler
+    LazyComputeCapability, GraphNode,
 )
-from layer1.billion_capable_engine import (
-    IntegratedBillionCapableEngine, BillionRowCapability, 
-    ChunkStrategy
-)
+
 from layer1.integration_layer import (
-    WorkloadProfile, EngineSelector, ComputeEngineAdapter
+    EngineSelector, ComputeEngineAdapter
 )
 
 # Import C++ acceleration
