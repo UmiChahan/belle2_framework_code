@@ -1823,11 +1823,11 @@ class Belle2ProductionFrameworkV3(Belle2Layer2Framework):
         ╔════════════════════════════════════════════════════╗
         ║     Belle II Enhanced Production Framework v3      ║
         ║                                                    ║
-        ║  ✓ Clean weight/data separation                   ║
-        ║  ✓ Unified histogram pipeline                     ║
-        ║  ✓ Consistent C++ acceleration                    ║
-        ║  ✓ Full backward compatibility                    ║
-        ║  ✓ Energy filtering & method injection            ║
+        ║  ✓ Clean weight/data separation                    ║
+        ║  ✓ Unified histogram pipeline                      ║
+        ║  ✓ Consistent C++ acceleration                     ║
+        ║  ✓ Full backward compatibility                     ║
+        ║  ✓ Energy filtering & method injection             ║
         ╚════════════════════════════════════════════════════╝
         """)
     

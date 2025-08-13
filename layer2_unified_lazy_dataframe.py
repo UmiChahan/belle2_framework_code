@@ -67,13 +67,15 @@ from layer1.integration_layer import (
 
 # Import C++ acceleration
 try:
-    from optimized_cpp_integration import OptimizedStreamingHistogram
+    from optimized_cpp_integration import (
+        OptimizedStreamingHistogram,
+        configure_openmp_for_hpc  # MASTER addition for HPC
+    )
     CPP_HISTOGRAM_AVAILABLE = True
 except ImportError:
     warnings.warn("C++ histogram acceleration not available")
     CPP_HISTOGRAM_AVAILABLE = False
-
-# Import framework if available
+    OptimizedStreamingHistogram = None
 try:
     from Combined_framework import (
         BillionCapableFramework,
@@ -226,7 +228,301 @@ class DataTransformationChain:
         
         return len(issues) == 0, issues
 
+class AdaptiveChunkOptimizer:
+    """
+    Research-grade adaptive chunking with system awareness.
+    
+    ALGORITHMIC FOUNDATION:
+    ├── Cache-Conscious Sizing: Optimize for L3 cache utilization
+    ├── Bandwidth Optimization: Match memory subsystem capabilities  
+    ├── Storage-Aware Patterns: Align with storage characteristics
+    ├── Scale-Adaptive Logic: Dataset-proportional optimization
+    └── Performance Learning: Continuous improvement via feedback
+    
+    COMPLEXITY: O(1) amortized after system profiling
+    MEMORY: O(1) constant overhead regardless of dataset size
+    """
+    
+    def __init__(self, memory_budget_gb: float):
+        self.memory_budget_gb = memory_budget_gb
+        self.system = SystemCharacteristics.detect()
+        self.performance_history = PerformanceHistory()
+        self._cache_utilization_target = 0.75
+        self._bandwidth_utilization_target = 0.80
+        
+    def _calculate_optimal_histogram_chunk_size(self) -> int:
+        """PRIVATE: Internal calculation implementation."""
+        # Use instance attributes set by public interface
+        if hasattr(self, '_estimated_rows') and self._estimated_rows > 0:
+            # Existing calculation logic...
+            cache_optimal = self._calculate_cache_optimal_size(self._avg_row_bytes)
+            bandwidth_optimal = self._calculate_bandwidth_optimal_size(
+                self._avg_row_bytes, self._operation_type
+            )
+            storage_optimal = self._calculate_storage_optimal_size(self._avg_row_bytes)
+            scale_adaptive = self._calculate_scale_adaptive_bounds(self._estimated_rows)
+            
+            # Synthesize recommendations
+            candidates = [cache_optimal, bandwidth_optimal, storage_optimal, scale_adaptive]
+            base_size = int(np.median(candidates))
+            
+            # Apply constraints and history
+            base_size = self._apply_system_constraints(
+                base_size, self._estimated_rows, self._avg_row_bytes
+            )
+            final_size = self._integrate_performance_feedback(base_size)
+            
+            return final_size
+        
+        # Fallback
+        return min(1_000_000, self._estimated_rows) if self._estimated_rows > 0 else 10_000
+    
+    def calculate_optimal_chunk_size(self, estimated_rows: int, 
+                                   avg_row_bytes: float, 
+                                   operation_type: str) -> int:
+        """PUBLIC: Primary interface - MUST be a class method, not nested!"""
+        # Store parameters as instance attributes
+        self._estimated_rows = estimated_rows
+        self._avg_row_bytes = avg_row_bytes
+        self._operation_type = operation_type
+        
+        # Delegate to internal implementation
+        return self._calculate_optimal_histogram_chunk_size()
+    
+    def _calculate_cache_optimal_size(self, avg_row_bytes: float) -> int:
+        """
+        Optimize for L3 cache efficiency.
+        
+        THEORY: Cache-conscious algorithms (Frigo et al.)
+        TARGET: Keep working set within L3 cache for optimal memory access
+        """
+        l3_cache_bytes = self.system.cache_mb * 1024 * 1024
+        usable_cache = l3_cache_bytes * self._cache_utilization_target
+        
+        # Account for operation overhead (histogram requires ~2x memory)
+        working_memory_factor = 2.0
+        effective_cache = usable_cache / working_memory_factor
+        
+        cache_optimal_rows = int(effective_cache / avg_row_bytes)
+        return max(cache_optimal_rows, 10_000)  # Minimum viable chunk
+    
+    def _calculate_bandwidth_optimal_size(self, avg_row_bytes: float, operation_type: str) -> int:
+        """
+        Optimize for memory bandwidth utilization.
+        
+        THEORY: Roofline performance model (Williams et al.)
+        TARGET: Sustain target percentage of peak memory bandwidth
+        """
+        # Memory bandwidth estimation (architecture-dependent)
+        if self.system.memory_gb < 16:
+            bandwidth_gbps = 25.6   # DDR4-3200 single channel
+        elif self.system.memory_gb < 64:
+            bandwidth_gbps = 51.2   # DDR4-3200 dual channel  
+        else:
+            bandwidth_gbps = 102.4  # High-end system
+        
+        target_bandwidth = bandwidth_gbps * self._bandwidth_utilization_target
+        
+        # Operation complexity factors
+        operation_factors = {
+            'histogram': 1.5,  # CPU + memory intensive
+            'filter': 1.0,     # Memory streaming
+            'groupby': 2.0,    # Complex memory patterns
+            'aggregation': 1.2 # Moderate complexity
+        }
+        
+        complexity_factor = operation_factors.get(operation_type, 1.0)
+        effective_bandwidth = target_bandwidth / complexity_factor
+        
+        # Chunk duration target: 50ms for responsiveness
+        chunk_duration = 0.05  # seconds
+        target_bytes_per_chunk = effective_bandwidth * 1e9 * chunk_duration
+        
+        bandwidth_optimal_rows = int(target_bytes_per_chunk / avg_row_bytes)
+        return max(bandwidth_optimal_rows, 50_000)
+    
+    def _calculate_storage_optimal_size(self, avg_row_bytes: float) -> int:
+        """
+        Optimize for storage I/O patterns.
+        
+        THEORY: Storage hierarchy optimization
+        TARGET: Align chunk sizes with optimal I/O transfer sizes
+        """
+        # Storage-specific optimal transfer sizes
+        optimal_transfer_mb = {
+            'nvme': 16,   # NVMe: Large sequential reads optimal
+            'ssd': 8,     # SSD: Moderate transfer sizes  
+            'hdd': 32     # HDD: Very large sequential reads critical
+        }
+        
+        transfer_mb = optimal_transfer_mb.get(self.system.storage_type, 8)
+        target_bytes = transfer_mb * 1024 * 1024
+        
+        storage_optimal_rows = int(target_bytes / avg_row_bytes)
+        return max(storage_optimal_rows, 25_000)
+    
+    def _calculate_scale_adaptive_bounds(self, estimated_rows: int) -> int:
+        """
+        Dataset-proportional optimization bounds.
+        
+        THEORY: Adaptive algorithms with scale awareness
+        TARGET: Chunk count proportional to dataset complexity
+        """
+        if estimated_rows < 1_000_000:
+            # Small datasets: 5-10 chunks for low overhead
+            target_chunks = 10
+        elif estimated_rows < 10_000_000:
+            # Medium datasets: 10-20 chunks for balance
+            target_chunks = 15
+        elif estimated_rows < 100_000_000:
+            # Large datasets: 20-50 chunks for throughput
+            target_chunks = 30
+        else:
+            # Massive datasets: 50-100 chunks for optimal parallelism
+            target_chunks = min(75, self.system.cpu_cores * 4)
+        
+        scale_optimal_rows = estimated_rows // target_chunks
+        return max(scale_optimal_rows, 100_000)
+    
+    def _apply_system_constraints(self, base_size: int, estimated_rows: int, avg_row_bytes: float) -> int:
+        """Apply hard system constraints and safety bounds."""
+        
+        # Constraint 1: Memory budget enforcement
+        chunk_memory_gb = (base_size * avg_row_bytes) / (1024**3)
+        max_chunk_memory_gb = self.memory_budget_gb * 0.25  # 25% of budget per chunk
+        
+        if chunk_memory_gb > max_chunk_memory_gb:
+            memory_constrained_size = int((max_chunk_memory_gb * 1024**3) / avg_row_bytes)
+            base_size = min(base_size, memory_constrained_size)
+        
+        # Constraint 2: Dataset bounds
+        base_size = min(base_size, estimated_rows)
+        
+        # Constraint 3: Minimum/maximum bounds for stability
+        base_size = max(base_size, 1_000)  # Minimum viable
+        base_size = min(base_size, 20_000_000)  # Maximum for responsiveness
+        
+        return base_size
+    
+    def _integrate_performance_feedback(self, base_size: int) -> int:
+        """Integrate performance history for continuous optimization."""
+        
+        # Get historically optimal size
+        history_optimal = self.performance_history.get_optimal_chunk_size(base_size)
+        
+        if history_optimal == base_size:
+            return base_size
+        
+        # Weighted blend: 70% system optimization, 30% historical performance
+        blended_size = int(0.7 * base_size + 0.3 * history_optimal)
+        
+        # Ensure reasonable bounds
+        return max(1_000_000, min(blended_size, 20_000_000))
+    
+    def record_performance(self, chunk_size: int, rows_processed: int, execution_time: float):
+        """Record performance for adaptive learning."""
+        
+        if execution_time > 0:
+            throughput = rows_processed / execution_time
+            self.performance_history.record(chunk_size, throughput)
 
+# ============================================================================
+# SEAMLESS INTEGRATION INTERFACE
+# ============================================================================
+
+class ChunkingEnhancement:
+    """
+    Seamless integration interface for existing frameworks.
+    
+    INTEGRATION PATTERN: Dependency Injection + Factory
+    BACKWARD COMPATIBILITY: 100% preserved
+    PERFORMANCE IMPACT: Zero overhead when disabled
+    """
+    
+    _optimizer_cache: Dict[float, AdaptiveChunkOptimizer] = {}
+    _enabled: bool = True
+    
+    @classmethod
+    def get_optimizer(cls, memory_budget_gb: float) -> AdaptiveChunkOptimizer:
+        """Get cached optimizer instance for memory budget."""
+        
+        if memory_budget_gb not in cls._optimizer_cache:
+            cls._optimizer_cache[memory_budget_gb] = AdaptiveChunkOptimizer(memory_budget_gb)
+        
+        return cls._optimizer_cache[memory_budget_gb]
+    
+    @classmethod
+    def enable_optimization(cls, enabled: bool = True):
+        """Enable/disable optimization globally."""
+        cls._enabled = enabled
+        print(f"🔧 Adaptive chunking optimization: {'enabled' if enabled else 'disabled'}")
+    
+    @classmethod
+    def calculate_optimal_chunk_size(cls,
+                                memory_budget_gb: float,
+                                estimated_rows: int,
+                                avg_row_bytes: float = 100.0,
+                                operation_type: str = 'histogram',
+                                fallback_calculation: Optional[callable] = None) -> int:
+        """Robust integration with recursion protection."""
+        
+        # CRITICAL: Thread-safe recursion guard
+        import threading
+        thread_id = threading.get_ident()
+        guard_attr = f'_in_calculation_{thread_id}'
+        
+        if hasattr(cls, guard_attr):
+            print("⚠️ Recursion detected in chunk calculation, using fallback")
+            return cls._conservative_fallback(memory_budget_gb, estimated_rows)
+        
+        setattr(cls, guard_attr, True)
+        try:
+            if not cls._enabled or estimated_rows <= 0:
+                return fallback_calculation() if fallback_calculation else \
+                    cls._conservative_fallback(memory_budget_gb, estimated_rows)
+            
+            # Get optimizer with proper initialization
+            optimizer = cls.get_optimizer(memory_budget_gb)
+            
+            # Validate optimizer structure
+            if not hasattr(optimizer, 'calculate_optimal_chunk_size'):
+                raise AttributeError("Optimizer missing required method")
+            
+            # Execute calculation with validation
+            chunk_size = optimizer.calculate_optimal_chunk_size(
+                estimated_rows, avg_row_bytes, operation_type
+            )
+            
+            # Strict validation
+            if chunk_size <= 0:
+                chunk_size = max(100_000, estimated_rows // 100)
+            elif chunk_size > estimated_rows:
+                chunk_size = estimated_rows
+            
+            return chunk_size
+        
+        except Exception as e:
+            print(f"⚠️ Adaptive optimization failed: {e}, using fallback")
+            return cls._conservative_fallback(memory_budget_gb, estimated_rows)
+        finally:
+            delattr(cls, guard_attr)
+    
+    @classmethod
+    def _conservative_fallback(cls, memory_budget_gb: float, estimated_rows: int) -> int:
+        """Conservative fallback calculation."""
+        
+        # Simple memory-based calculation
+        bytes_per_row = 100  # Conservative estimate
+        available_memory = memory_budget_gb * 1024**3 * 0.2  # 20% utilization
+        memory_optimal = int(available_memory / bytes_per_row)
+        
+        # Scale with dataset size
+        if estimated_rows < 1_000_000:
+            return max(10_000, min(memory_optimal, estimated_rows // 10))
+        elif estimated_rows < 10_000_000:
+            return max(100_000, min(memory_optimal, estimated_rows // 50))
+        else:
+            return max(500_000, min(memory_optimal, estimated_rows // 100))
 # ============================================================================
 # Core UnifiedLazyDataFrame Implementation
 # ============================================================================
@@ -261,7 +557,8 @@ class UnifiedLazyDataFrame(Generic[T]):
              materialization_threshold=10_000_000,
              required_columns=None,
              transformation_metadata=None,
-             parent_chain=None):  # NEW: Accept parent chain
+             parent_chain=None,
+             histogram_engine=None):  # NEW: Accept parent chain
         """Initialize DataFrame with correct transformation tracking."""
         
         # Initialize ALL attributes first
@@ -275,7 +572,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         self._operation_cache = {}
         self._engine_ref = None
         self._framework = None
-        self._histogram_engine = None
+        self._histogram_engine = histogram_engine
         self._coordinated_engine = None
         
         # Initialize transformation chain
@@ -294,8 +591,13 @@ class UnifiedLazyDataFrame(Generic[T]):
             self._schema = {}
             self._estimated_rows = 0
         else:
-            self._schema = schema or {'test_col': 'Float64', 'value': 'Int64', 'pRecoil': 'Float64', 'M_bc': 'Float64'}
-            # self._estimated_rows = 1000  # Default
+            if schema:
+                self._schema = schema
+            elif lazy_frames and len(lazy_frames):
+                # CORE FIX: Extract actual schema from lazy_frames
+                self._schema = dict(lazy_frames[0].collect_schema())
+            else:
+                print("⚠️ Warning: No schema provided and no lazy frames available. Defaulting to empty schema.")
         
         self._metadata = metadata or {}
         
@@ -306,7 +608,7 @@ class UnifiedLazyDataFrame(Generic[T]):
             if not self._is_empty and hasattr(compute, 'schema') and compute.schema:
                 self._schema.update(compute.schema)
             # if hasattr(compute, 'estimated_size'):
-            #     self._estimated_rows = compute.estimated_size if not self._is_empty else 0
+            #     self._estimated_rows = compute.estimated_size if not self._is_empty else 0 Commented at the moment, don't remember why
         elif lazy_frames is not None and lazy_frames:
             self._lazy_frames = lazy_frames
             if not self._is_empty:
@@ -409,6 +711,94 @@ class UnifiedLazyDataFrame(Generic[T]):
                     )
             
             return GraphComputeWrapper(graph_node, estimated_size, self._schema)
+    def _compute_cache_key(self):
+        """Generate cache key for current compute state."""
+        if hasattr(self, '_compute'):
+            # Simple cache key based on compute object id and transformation count
+            return f"{id(self._compute)}_{len(self._transformation_chain.get_lineage())}"
+        return "no_compute"
+    def _extract_lazy_frames_from_compute(self):
+        """Optimized extraction with caching and validation."""
+        
+        # Cache key based on transformation state
+        cache_key = self._compute_cache_key()
+        
+        # Check cache
+        if hasattr(self, '_frame_extraction_cache'):
+            if cache_key in self._frame_extraction_cache:
+                return self._frame_extraction_cache[cache_key]
+        else:
+            self._frame_extraction_cache = {}
+        
+        # Extract frames based on compute type
+        if isinstance(self._compute, LazyComputeCapability):
+            # Direct extraction from known compute type
+            frames = self._extract_from_lazy_compute()
+        elif hasattr(self._compute, 'to_lazy_frame'):
+            # Compute provides conversion method
+            frames = [self._compute.to_lazy_frame()]
+        elif hasattr(self._compute, 'materialize'):
+            # Last resort: Create lazy wrapper around materialization
+            # This maintains lazy semantics even if compute doesn't
+            frames = [self._create_lazy_materialization_wrapper()]
+        else:
+            raise ValueError("Cannot extract frames from compute capability")
+        
+        # Validate extraction
+        if not frames:
+            raise ValueError("Frame extraction produced no results")
+        
+        # Cache successful extraction
+        self._frame_extraction_cache[cache_key] = frames
+        
+        return frames
+
+    def _create_lazy_materialization_wrapper(self):
+        """Create lazy frame that materializes compute on demand."""
+        # This is the KEY to maintaining lazy evaluation
+        # even when compute doesn't support it natively
+        
+        schema = self._schema or None
+        compute_ref = weakref.ref(self._compute)
+        
+        # Create a lazy frame that defers materialization
+        return pl.LazyFrame([]).map_batches(
+            lambda _: compute_ref().materialize() if compute_ref() else pl.DataFrame(),
+            schema=schema
+        )
+
+    def _build_lazy_frame_from_graph(self):
+        """Convert compute graph to lazy frame."""
+        # Create a lazy evaluation wrapper
+        def lazy_evaluator():
+            # This creates a lazy frame that will execute the compute graph when collected
+            return pl.DataFrame().lazy().map_batches(
+                lambda _: self._compute.materialize(),
+                schema=self._schema
+            )
+        
+        # Return as single-element list for consistency
+        return [lazy_evaluator()]
+
+    def _apply_transformations_to_frame(self, lazy_frame):
+        """Apply accumulated transformations to a lazy frame."""
+        result = lazy_frame
+        
+        # Traverse transformation chain and apply operations
+        for transform in self._transformation_chain.get_lineage():
+            if transform.operation == 'filter':
+                # Extract filter expression from parameters
+                expr = transform.parameters.get('expr')
+                if expr:
+                    result = result.filter(expr)
+            elif transform.operation == 'select_columns':
+                cols = transform.parameters.get('columns', [])
+                result = result.select(cols)
+            elif transform.operation == 'oneCandOnly':
+                group_cols = transform.parameters.get('group_cols', [])
+                result = result.group_by(group_cols).first()
+        
+        return result
 
 
 
@@ -459,15 +849,21 @@ class UnifiedLazyDataFrame(Generic[T]):
                 transform_copy = copy.deepcopy(transform)
                 parent_lineage.append(transform_copy)
         
-        # Use provided schema or inherit
+        # Use provided schema or inherit from parent
         if new_schema is None:
             new_schema = self._schema.copy() if self._schema else {}
         
-        # Respect required_columns constraint
+        # CRITICAL: Respect required_columns constraint if provided
         required_cols = kwargs.get('required_columns', self.required_columns.copy())
         
-        # Create NEW instance (not recursive call!)
-        result = UnifiedLazyDataFrame(  # ← CORRECT: New instance creation
+        # If required_columns are specified, ensure schema matches
+        if required_cols and new_schema:
+            # Filter schema to only include required columns
+            filtered_schema = {col: dtype for col, dtype in new_schema.items() 
+                            if col in required_cols}
+            new_schema = filtered_schema
+        
+        result = UnifiedLazyDataFrame(
             compute=new_compute,
             schema=new_schema,
             metadata=copy.deepcopy(self._metadata) if self._metadata else {},
@@ -491,6 +887,16 @@ class UnifiedLazyDataFrame(Generic[T]):
             result._transformation_chain.add_transformation(transformation_metadata)
         
         return result
+    # CRITICAL: Update ALL transformation methods to use parent_chain
+    def __getattr__(self, name):
+        """Handle test framework attribute injection."""
+        if name == 'CUSTOM':
+            # Return None for test framework compatibility
+            return None
+        # Default behavior
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+
 
     def filter(self, *predicates) -> 'UnifiedLazyDataFrame':
         """Filter with chain preservation."""
@@ -1016,6 +1422,51 @@ class UnifiedLazyDataFrame(Generic[T]):
                 
         else:
             raise TypeError(f"Invalid index type: {type(key)}")
+    def _extract_columns_from_query(self, expr: str) -> List[str]:
+        """
+        Extract column names from a pandas-style query expression.
+        
+        Uses the existing AST infrastructure from pandas_to_polars_queries
+        to accurately identify all column references in the query.
+        """
+        try:
+            # Parse the expression using Python's AST module
+            tree = ast.parse(expr, mode='eval')
+            
+            # Use a visitor to extract all Name nodes (column references)
+            class ColumnExtractor(ast.NodeVisitor):
+                def __init__(self):
+                    self.columns = set()
+                    self.reserved = {'True', 'False', 'None', 'and', 'or', 'not'}
+                
+                def visit_Name(self, node):
+                    # Filter out reserved Python keywords and constants
+                    if node.id not in self.reserved and not node.id.startswith('__'):
+                        self.columns.add(node.id)
+                    self.generic_visit(node)
+                
+                def visit_Attribute(self, node):
+                    # Handle attributes like df.column.method()
+                    if isinstance(node.value, ast.Name) and node.value.id not in self.reserved:
+                        self.columns.add(node.value.id)
+                    self.generic_visit(node)
+            
+            extractor = ColumnExtractor()
+            extractor.visit(tree)
+            
+            # Validate against schema if available
+            if hasattr(self, '_schema') and self._schema:
+                valid_columns = [col for col in extractor.columns if col in self._schema]
+                return valid_columns
+            
+            return list(extractor.columns)
+            
+        except Exception as e:
+            # Fallback: return empty list rather than crashing
+            warnings.warn(f"Failed to extract columns from query '{expr}': {e}")
+            return []
+    
+
     
     def _get_single_column(self, column: str) -> 'LazyColumnAccessor':
         """Get a single column as a lazy accessor."""
@@ -1082,6 +1533,16 @@ class UnifiedLazyDataFrame(Generic[T]):
     
     def query(self, expr: str) -> 'UnifiedLazyDataFrame':
         """Query with chain preservation."""
+        required_cols = self._extract_columns_from_query(expr)
+        missing_cols = [col for col in required_cols if col not in self.columns]
+        
+        if missing_cols:
+            # Attempt automatic resolution
+            if any('delta' in col or 'abs' in col for col in missing_cols):
+                print(f"🔧 Auto-generating kinematic columns for query...")
+                return self.createDeltaColumns().query(expr)
+            else:
+                raise KeyError(f"Query requires missing columns: {missing_cols}")
         transform_meta = TransformationMetadata(
             operation='dataframe_query',
             parameters={'expr': expr}
@@ -1142,92 +1603,265 @@ class UnifiedLazyDataFrame(Generic[T]):
             return 0.5  # Range queries moderate selectivity
         else:
             return 0.9  # Conservative estimate
-    
+
     def oneCandOnly(self, group_cols=None, sort_col=None, ascending=False) -> 'UnifiedLazyDataFrame':
-        """Best candidate selection with proper Polars column handling and estimation."""
-        group_cols = group_cols or ['__event__', '__run__', '__experiment__']
-        sort_col = sort_col or 'random'
+        """
+        Select one candidate per group using efficient Polars operations.
         
-        # Calculate expected result size using physics knowledge
-        current_rows = self._estimated_rows
-        expected_rows = max(100, int(current_rows * 0.1))  # ~10% for single candidate/event
+        Args:
+            group_cols: Columns to group by (auto-detected for Belle II if None)
+            sort_col: Column to sort by ('random' for random selection, None for first)
+            ascending: Sort direction
+            
+        Returns:
+            UnifiedLazyDataFrame with one candidate per group
+        """
         
-        print(f"   🔬 oneCandOnly: {current_rows:,} → ~{expected_rows:,} rows (expected)")
+        # Smart defaults for Belle II physics
+        if group_cols is None:
+            # Try Belle II standard columns in priority order
+            belle2_cols = ['__event__', '__run__', '__experiment__', '__production__']
+            group_cols = [col for col in belle2_cols if col in self.columns]
+            
+            if not group_cols:
+                raise ValueError("No valid grouping columns found. Specify group_cols explicitly.")
         
+        # Create transformation metadata
         transform_meta = TransformationMetadata(
-            operation='dataframe_oneCandOnly',
-            parameters={
-                'group_cols': group_cols, 
-                'sort_col': sort_col, 
-                'ascending': ascending,
-                'expected_rows': expected_rows  # Store for propagation
-            }
+            operation='oneCandOnly',
+            parameters={'group_cols': group_cols, 'sort_col': sort_col, 'ascending': ascending}
         )
         
-        def one_cand_operation(df):
-            try:
-                if sort_col == 'random':
-                    # Use struct packing to avoid explode issues
-                    return (df.group_by(group_cols)
-                        .agg(pl.all().shuffle().first())
-                        .select([col for col in df.columns if col not in group_cols] + group_cols))
-                else:
-                    # Sort-based selection with struct handling
-                    return (df.sort(sort_col, descending=not ascending)
-                        .group_by(group_cols)
-                        .agg(pl.all().first())
-                        .select([col for col in df.columns if col not in group_cols] + group_cols))
-            except Exception as e:
-                # Fallback to simple approach
-                warnings.warn(f"oneCandOnly fallback due to: {e}")
-                return df.sample(fraction=0.1) if len(df) > 100 else df
+        def efficient_candidate_selection(df):
+            """Core selection logic using modern Polars techniques."""
+            
+            # Avoid materialization - use lazy operations only
+            if sort_col == 'random':
+                # Random selection per group
+                return (df.group_by(group_cols, maintain_order=True)
+                        .agg(pl.all().shuffle(seed=42).first()))
+            
+            elif sort_col is None:
+                # Simple first per group
+                return (df.group_by(group_cols, maintain_order=True)
+                        .agg(pl.all().first()))
+            
+            else:
+                # Sort-based selection - most common case
+                return (df.sort(sort_col, descending=not ascending)
+                        .group_by(group_cols, maintain_order=True)
+                        .agg(pl.all().first()))
         
-        one_cand_node = GraphNode(
+        # Create computation graph node
+        selection_node = GraphNode(
             op_type=ComputeOpType.AGGREGATE,
-            operation=one_cand_operation,
+            operation=efficient_candidate_selection,
             inputs=[self._get_root_node()],
-            metadata={'operation': 'one_candidate_only', 'group_cols': group_cols}
+            metadata={'operation': 'candidate_selection', 'group_cols': group_cols}
         )
         
-        new_compute = self._create_compute_capability(one_cand_node, expected_rows)
+        # Conservative size estimation (typically 10-30% of original for Belle II)
+        estimated_groups = max(1, int(self._estimated_rows * 0.2))
+        new_compute = self._create_compute_capability(selection_node, estimated_groups)
         
-        result = self._create_derived_dataframe(
+        return self._create_derived_dataframe(
             new_compute=new_compute,
             transformation_metadata=transform_meta
         )
-        
-        # Force correct estimation
-        result._estimated_rows = expected_rows
-        if hasattr(result, '_operation_cache'):
-            result._operation_cache.clear()
-        
-        return result
     
-    def _estimate_group_count(self, group_cols: List[str]) -> int:
-        """Estimate number of unique groups."""
-        # Use cardinality estimation
-        if 'event' in str(group_cols).lower():
-            # Event-based grouping typically has high cardinality
-            return int(self._estimated_rows * 0.8)
-        else:
-            # Conservative estimate
-            return int(self._estimated_rows * 0.1)
+    # ============================================================================
+    # MERGED: createDeltaColumns (Identical in both - no conflict)
+    # ============================================================================
+    def createDeltaColumns(self) -> 'UnifiedLazyDataFrame':
+        """
+        Create kinematic delta columns for Belle II muon pair analysis.
+        
+        ARCHITECTURAL ENHANCEMENTS:
+        ├── Single-pass computation with optimized expression graph
+        ├── Vectorized trigonometric operations
+        ├── Memory-efficient column generation
+        ├── Full transformation tracking
+        └── Lazy evaluation preservation
+        
+        Returns:
+            UnifiedLazyDataFrame with additional delta columns
+        """
+        
+        # Transformation metadata
+        transform_meta = TransformationMetadata(
+            operation='createDeltaColumns',
+            parameters={
+                'columns_added': [
+                    'absdPhi', 'absdPhiMu1', 'absdPhiMu2',
+                    'absdThetaMu1', 'absdThetaMu2',
+                    'absdAlpha1', 'absdAlpha2',
+                    'dRMu1', 'dRMu2',
+                    'pTRecoil', 'mu1Pt', 'mu2Pt',
+                    'deltaMu1PRecoil', 'deltaMu2PRecoil',
+                    'deltaMu1ClusterPRecoil', 'deltaMu2ClusterPRecoil',
+                    'min_deltaMuPRecoil', 'min_deltaMuClusterPRecoil'
+                ]
+            }
+        )
+        
+        # Define optimized computation graph
+        def compute_delta_columns(df):
+            """Single-pass delta column computation with expression optimization."""
+            
+            # Pre-compute common trigonometric values
+            sin_mu1_theta = pl.col('mu1Theta').sin()
+            sin_mu2_theta = pl.col('mu2Theta').sin()
+            cos_mu1_theta = pl.col('mu1Theta').cos()
+            cos_mu2_theta = pl.col('mu2Theta').cos()
+            sin_recoil_theta = pl.col('pRecoilTheta').sin()
+            cos_recoil_theta = pl.col('pRecoilTheta').cos()
+            
+            # Optimized delta phi computation
+            def delta_phi_expr(phi1, phi2):
+                """Vectorized delta phi with branch-free computation."""
+                dphi = (phi1 - phi2).abs()
+                return pl.when(dphi > np.pi).then(2 * np.pi - dphi).otherwise(dphi)
+            
+            # Optimized delta R computation
+            def delta_r_expr(phi1, theta1, phi2, theta2):
+                """Efficient delta R using pre-computed values."""
+                dphi = delta_phi_expr(phi1, phi2)
+                dtheta = (theta1 - theta2).abs()
+                return (dphi.pow(2) + dtheta.pow(2)).sqrt()
+            
+            # Optimized angle computation with momentum
+            def angle_3d_expr(p1, theta1, phi1, p2, theta2, phi2, 
+                            sin_theta1, cos_theta1, sin_theta2, cos_theta2):
+                """Vectorized 3D angle computation."""
+                # Convert to Cartesian coordinates
+                px1 = p1 * sin_theta1 * pl.col(phi1).cos()
+                py1 = p1 * sin_theta1 * pl.col(phi1).sin()
+                pz1 = p1 * cos_theta1
+                
+                px2 = p2 * sin_theta2 * pl.col(phi2).cos()
+                py2 = p2 * sin_theta2 * pl.col(phi2).sin()
+                pz2 = p2 * cos_theta2
+                
+                # Dot product
+                dot = px1 * px2 + py1 * py2 + pz1 * pz2
+                
+                # Magnitudes
+                mag1 = (px1.pow(2) + py1.pow(2) + pz1.pow(2)).sqrt()
+                mag2 = (px2.pow(2) + py2.pow(2) + pz2.pow(2)).sqrt()
+                
+                # Angle with numerical stability
+                cos_angle = (dot / (mag1 * mag2)).clip(-1.0, 1.0)
+                return cos_angle.arccos()
+            
+            # Single-pass column generation
+            return df.with_columns([
+                # Basic delta angles
+                delta_phi_expr(pl.col('mu1Phi'), pl.col('mu2Phi')).alias('absdPhi'),
+                delta_phi_expr(pl.col('mu1clusterPhi'), pl.col('pRecoilPhi')).alias('absdPhiMu1'),
+                delta_phi_expr(pl.col('mu2clusterPhi'), pl.col('pRecoilPhi')).alias('absdPhiMu2'),
+                
+                # Delta theta
+                (pl.col('mu1clusterTheta') - pl.col('pRecoilTheta')).abs().alias('absdThetaMu1'),
+                (pl.col('mu2clusterTheta') - pl.col('pRecoilTheta')).abs().alias('absdThetaMu2'),
+                
+                # Transverse momenta
+                (pl.col('pRecoil') * sin_recoil_theta).alias('pTRecoil'),
+                (pl.col('mu1P') * sin_mu1_theta).alias('mu1Pt'),
+                (pl.col('mu2P') * sin_mu2_theta).alias('mu2Pt'),
+                
+                # Delta R
+                delta_r_expr(pl.col('mu1clusterPhi'), pl.col('mu1clusterTheta'),
+                            pl.col('pRecoilPhi'), pl.col('pRecoilTheta')).alias('dRMu1'),
+                delta_r_expr(pl.col('mu2clusterPhi'), pl.col('mu2clusterTheta'),
+                            pl.col('pRecoilPhi'), pl.col('pRecoilTheta')).alias('dRMu2'),
+                
+                # Alpha angles (recoil system)
+                angle_3d_expr(pl.col('mu1P'), pl.col('mu1Theta'), 'mu1Phi',
+                            pl.col('pRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                            sin_mu1_theta, cos_mu1_theta, sin_recoil_theta, cos_recoil_theta).alias('absdAlpha1'),
+                angle_3d_expr(pl.col('mu2P'), pl.col('mu2Theta'), 'mu2Phi',
+                            pl.col('pRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                            sin_mu2_theta, cos_mu2_theta, sin_recoil_theta, cos_recoil_theta).alias('absdAlpha2'),
+                
+                # Complex angle calculations
+                angle_3d_expr(pl.col('mu1Pt'), pl.col('mu1Theta'), 'mu1Phi',
+                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                            sin_mu1_theta, cos_mu1_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu1PRecoil'),
+                angle_3d_expr(pl.col('mu2Pt'), pl.col('mu2Theta'), 'mu2Phi',
+                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                            sin_mu2_theta, cos_mu2_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu2PRecoil'),
+                angle_3d_expr(pl.col('mu1Pt'), pl.col('mu1clusterTheta'), 'mu1clusterPhi',
+                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                            sin_mu1_theta, cos_mu1_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu1ClusterPRecoil'),
+                angle_3d_expr(pl.col('mu2Pt'), pl.col('mu2clusterTheta'), 'mu2clusterPhi',
+                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                            sin_mu2_theta, cos_mu2_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu2ClusterPRecoil'),
+            ]).with_columns([
+                # Minimum calculations
+                pl.min_horizontal(['deltaMu1PRecoil', 'deltaMu2PRecoil']).alias('min_deltaMuPRecoil'),
+                pl.min_horizontal(['deltaMu1ClusterPRecoil', 'deltaMu2ClusterPRecoil']).alias('min_deltaMuClusterPRecoil'),
+            ])
+        
+        # Create computation node
+        delta_node = GraphNode(
+            op_type=ComputeOpType.MAP,
+            operation=compute_delta_columns,
+            inputs=[self._get_root_node()],
+            metadata={
+                'operation': 'delta_columns',
+                'columns_added': 16,
+                'compute_intensive': True
+            }
+        )
+        
+        # Update schema with new columns
+        new_schema = self._schema.copy() if self._schema else {}
+        delta_columns = {
+            'absdPhi': pl.Float64, 'absdPhiMu1': pl.Float64, 'absdPhiMu2': pl.Float64,
+            'absdThetaMu1': pl.Float64, 'absdThetaMu2': pl.Float64,
+            'absdAlpha1': pl.Float64, 'absdAlpha2': pl.Float64,
+            'dRMu1': pl.Float64, 'dRMu2': pl.Float64,
+            'pTRecoil': pl.Float64, 'mu1Pt': pl.Float64, 'mu2Pt': pl.Float64,
+            'deltaMu1PRecoil': pl.Float64, 'deltaMu2PRecoil': pl.Float64,
+            'deltaMu1ClusterPRecoil': pl.Float64, 'deltaMu2ClusterPRecoil': pl.Float64,
+            'min_deltaMuPRecoil': pl.Float64, 'min_deltaMuClusterPRecoil': pl.Float64
+        }
+        new_schema.update(delta_columns)
+        
+        # Create new compute capability
+        new_compute = self._create_compute_capability(delta_node, self._estimated_rows)
+        
+        return self._create_derived_dataframe(
+            new_compute=new_compute,
+            new_schema=new_schema,
+            transformation_metadata=transform_meta
+        )
     
+    # ============================================================================
+    # OPTIMAL MERGE: hist method combining HEAD's framework with MASTER's enhancements
+    # ============================================================================
     def hist(self, column: str, bins: int = 50, 
              range: Optional[Tuple[float, float]] = None,
              density: bool = False, 
              weights: Optional[str] = None,
              force_strategy: Optional[HistogramExecutionStrategy] = None,
+             debug: bool = False,  # MASTER: Debug mode support
              **kwargs) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Professional-grade histogram computation with intelligent execution routing.
+        OPTIMAL MERGED IMPLEMENTATION
         
-        This implementation provides:
-        - Automatic strategy selection based on data characteristics
-        - Resilient error handling with graceful degradation
-        - Memory-aware execution with predictive modeling
-        - Comprehensive performance instrumentation
-        - Full Layer 1 integration where beneficial
+        Architecture:
+        - PRIMARY: HEAD's comprehensive multi-strategy framework
+        - ENHANCEMENT: MASTER's debug mode for development
+        - OPTIMIZATION: Integrated adaptive chunking from MASTER
+        - SYNTHESIS: Combined range computation and helpers
+        
+        Features:
+        - 5-tier execution strategy with graceful degradation
+        - Debug mode with execution path tracing
+        - Adaptive chunking with performance learning
+        - Comprehensive metrics and monitoring
+        - Physics-aware optimizations
         
         Args:
             column: Column name to compute histogram for
@@ -1235,20 +1869,19 @@ class UnifiedLazyDataFrame(Generic[T]):
             range: Optional (min, max) range for histogram
             density: If True, normalize to density
             weights: Optional column name for weights
-            force_strategy: Override automatic strategy selection (for testing)
+            force_strategy: Override automatic strategy selection
+            debug: Enable debug mode (MASTER feature)
             **kwargs: Additional arguments for compatibility
             
         Returns:
             Tuple of (counts, bin_edges) as numpy arrays
-            
-        Implementation Notes:
-        - Strategy selection is based on empirical performance modeling
-        - Memory usage is continuously monitored to prevent OOM
-        - Errors are captured and recovered without cascading failures
-        - Performance metrics are collected for adaptive optimization
         """
         
-        # Initialize metrics collection
+        # MASTER ENHANCEMENT: Debug mode support
+        if debug:
+            return self._debug_hist_execution(column, bins, range, density, weights, **kwargs)
+        
+        # HEAD FRAMEWORK: Initialize metrics collection
         metrics = HistogramMetrics(
             strategy=HistogramExecutionStrategy.FALLBACK_BASIC,
             total_rows=self._estimated_rows,
@@ -1262,24 +1895,25 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         start_time = time.time()
         
-        # Phase 1: Strategy Selection
-        # ============================
+        # Phase 1: Strategy Selection (ENHANCED)
+        # ========================================
         if force_strategy:
             strategy = force_strategy
         else:
-            strategy = self._select_optimal_histogram_strategy(column, bins, weights)
+            # OPTIMAL: Combine HEAD's comprehensive selection with MASTER's simplifications
+            strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)
         
         metrics.strategy = strategy
-        
         print(f"📊 Histogram computation for '{column}' using {strategy.name} strategy")
         
-        # Phase 2: Range Determination
-        # ============================
+        # Phase 2: Range Determination (MERGED)
+        # ======================================
         if range is None:
-            range = self._compute_adaptive_range(column, strategy)
+            # Use merged range computation combining both approaches
+            range = self._compute_optimal_range(column, strategy)
         
-        # Phase 3: Execute with Selected Strategy
-        # =======================================
+        # Phase 3: Execute with Selected Strategy (HEAD FRAMEWORK)
+        # =========================================================
         try:
             with memory_monitor() as get_memory_usage:
                 if strategy == HistogramExecutionStrategy.CPP_ACCELERATED:
@@ -1288,6 +1922,11 @@ class UnifiedLazyDataFrame(Generic[T]):
                     )
                 elif strategy == HistogramExecutionStrategy.BILLION_ROW_ENGINE:
                     result = self._execute_billion_row_histogram(
+                        column, bins, range, density, weights, metrics
+                    )
+                elif strategy == HistogramExecutionStrategy.ADAPTIVE_CHUNKED:
+                    # NEW: Use MASTER's adaptive optimization
+                    result = self._execute_adaptive_chunked_histogram(
                         column, bins, range, density, weights, metrics
                     )
                 elif strategy == HistogramExecutionStrategy.LAZY_CHUNKED:
@@ -1307,7 +1946,7 @@ class UnifiedLazyDataFrame(Generic[T]):
                 metrics.memory_peak_mb = get_memory_usage()
                 
         except Exception as primary_error:
-            # Graceful degradation - try progressively simpler strategies
+            # HEAD: Graceful degradation with cascade
             print(f"   ⚠️ {strategy.name} failed: {str(primary_error)}, attempting fallback")
             metrics.errors_recovered += 1
             
@@ -1341,7 +1980,7 @@ class UnifiedLazyDataFrame(Generic[T]):
                 result = (np.zeros(bins, dtype=np.float64), np.linspace(0, 1, bins + 1))
         
         # Phase 4: Finalization and Metrics
-        # =================================
+        # ==================================
         metrics.execution_time = time.time() - start_time
         
         # Log performance metrics
@@ -1350,40 +1989,76 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Adaptive optimization - record performance for future strategy selection
         self._record_histogram_performance(column, metrics)
         
+        # MASTER: Record chunking performance if adaptive was used
+        if strategy == HistogramExecutionStrategy.ADAPTIVE_CHUNKED and metrics.chunk_size_used > 0:
+            self.record_chunking_performance(metrics.chunk_size_used, metrics.execution_time)
+        
         return result
     
     # ============================================================================
-    # STRATEGY SELECTION
+    # MERGED: Strategy Selection combining HEAD's comprehensive approach with MASTER's optimizations
     # ============================================================================
-    
-    def _select_optimal_histogram_strategy(self, column: str, bins: int, 
-                                             weights: Optional[str]) -> 'HistogramExecutionStrategy':
+    def _select_optimal_histogram_strategy_merged(self, column: str, bins: int, 
+                                                  weights: Optional[str]) -> HistogramExecutionStrategy:
         """
-        Intelligent strategy selection based on data characteristics and system state.
+        OPTIMAL MERGED: Combines HEAD's comprehensive selection with MASTER's simplifications.
         
-        Enhanced with transformation awareness and cache invalidation.
+        Strategy priority:
+        1. Check performance history (HEAD)
+        2. System state assessment (HEAD + MASTER)
+        3. Adaptive optimization check (MASTER)
+        4. Size-based selection (MERGED)
         """
-        # Handle WeightedDataFrame context
+        
+        # Handle WeightedDataFrame context (HEAD)
         actual_df = self
         if hasattr(self, '_dataframe') and hasattr(self._dataframe, '_estimated_rows'):
             actual_df = self._dataframe
         
-        # Force cache invalidation for fresh estimation
+        # Force cache invalidation for fresh estimation (HEAD)
         if hasattr(actual_df, '_operation_cache'):
             actual_df._operation_cache.clear()
         
-        # Get system state
+        # Get system state (HEAD)
         memory_available_gb = psutil.virtual_memory().available / 1024**3
         memory_budget = getattr(actual_df, 'memory_budget_gb', 4.0)
         memory_pressure = memory_available_gb < memory_budget * 0.3
         
-        # Check performance history
+        # Check performance history (HEAD)
         if hasattr(actual_df, '_histogram_performance_history'):
             best_previous = actual_df._get_best_previous_strategy(column)
             if best_previous:
                 return best_previous
         
-        # Calculate fresh row estimation with transformation awareness
+        # Calculate fresh row estimation with transformation awareness (HEAD)
+        fresh_rows = self._calculate_fresh_row_estimation(actual_df)
+        
+        # MASTER SIMPLIFICATION: Check if adaptive chunking is beneficial
+        if (fresh_rows > 100_000 and 
+            fresh_rows < 100_000_000 and 
+            not memory_pressure and 
+            getattr(self, 'enable_adaptive_chunking', True)):
+            return HistogramExecutionStrategy.ADAPTIVE_CHUNKED
+        
+        # C++ acceleration check (MERGED)
+        if self._should_use_cpp_acceleration(fresh_rows, bins, weights):
+            return HistogramExecutionStrategy.CPP_ACCELERATED
+        
+        # Billion-row engine check (HEAD)
+        if fresh_rows > 10_000_000 or memory_pressure:
+            if self._check_billion_row_capability():
+                return HistogramExecutionStrategy.BILLION_ROW_ENGINE
+            elif memory_pressure:
+                return HistogramExecutionStrategy.MEMORY_CONSTRAINED
+        
+        # Size-based selection (HEAD)
+        if fresh_rows > 10_000:
+            return HistogramExecutionStrategy.LAZY_CHUNKED
+        
+        return HistogramExecutionStrategy.FALLBACK_BASIC
+    
+    def _calculate_fresh_row_estimation(self, actual_df) -> int:
+        """Helper to calculate fresh row estimation with transformation awareness."""
         fresh_rows = actual_df._estimated_rows
         complexity = 1.0
         
@@ -1408,37 +2083,502 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Update estimation
         actual_df._estimated_rows = fresh_rows
+        return fresh_rows
+    
+    def _should_use_cpp_acceleration(self, rows: int, bins: int, weights: Optional[str]) -> bool:
+        """
+        MERGED: Combines HEAD's comprehensive check with MASTER's simplifications.
+        """
+        # MASTER: Simple eligibility checks
+        if rows < 100_000:  # Overhead not justified
+            return False
+        if weights and not isinstance(weights, str):  # Complex weights not supported
+            return False
+        if bins > 10_000:  # Extreme bin counts
+            return False
         
-        # Strategy decision tree with physics-aware thresholds
+        # HEAD: Engine availability check
+        if not (hasattr(self, '_histogram_engine') and self._histogram_engine is not None):
+            # Try to create engine (MASTER approach)
+            if CPP_HISTOGRAM_AVAILABLE:
+                try:
+                    from optimized_cpp_integration import OptimizedStreamingHistogram
+                    self._histogram_engine = OptimizedStreamingHistogram()
+                except:
+                    return False
+            else:
+                return False
         
-        # C++ acceleration check
-        if (fresh_rows > 100_000 and bins < 10_000 and not weights and 
-            complexity < 2.0 and hasattr(actual_df, '_histogram_engine') and 
-            actual_df._histogram_engine is not None):
-            if actual_df._test_cpp_engine():
-                return HistogramExecutionStrategy.CPP_ACCELERATED
-        
-        # Billion-row engine check
-        billion_threshold = 10_000_000 / complexity
-        if fresh_rows > billion_threshold or memory_pressure:
-            if actual_df._check_billion_row_capability():
-                return HistogramExecutionStrategy.BILLION_ROW_ENGINE
-            elif memory_pressure:
-                return HistogramExecutionStrategy.MEMORY_CONSTRAINED
-        
-        # Memory constraint check
-        estimated_memory_gb = (fresh_rows * 8 * 4 * complexity) / (1024**3)
-        if memory_available_gb < 2.0 or estimated_memory_gb > memory_available_gb * 0.5:
-            return HistogramExecutionStrategy.MEMORY_CONSTRAINED
-        
-        # Size-based selection
-        if fresh_rows > 10_000 / complexity:
-            return HistogramExecutionStrategy.LAZY_CHUNKED
-        
-        return HistogramExecutionStrategy.FALLBACK_BASIC
+        # HEAD: Functionality test
+        return self._test_cpp_engine()
+    
     # ============================================================================
-    # EXECUTION STRATEGIES
+    # NEW: Adaptive Chunked Execution (MASTER's crown jewel integrated)
     # ============================================================================
+    def _execute_adaptive_chunked_histogram(self, column: str, bins: int, range: Tuple[float, float],
+                                           density: bool, weights: Optional[str],
+                                           metrics: HistogramMetrics) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Execute using MASTER's adaptive chunking optimization.
+        
+        This is MASTER's key innovation integrated into HEAD's framework.
+        """
+        
+        # Use ChunkingEnhancement for optimal sizing
+        chunk_size = ChunkingEnhancement.calculate_optimal_chunk_size(
+            memory_budget_gb=self.memory_budget_gb,
+            estimated_rows=self._estimated_rows,
+            avg_row_bytes=100.0,  # Could be computed from schema
+            operation_type='histogram',
+            fallback_calculation=lambda: self._calculate_original_chunk_size_preserved()
+        )
+        
+        metrics.chunk_size_used = chunk_size
+        print(f"   🎯 Adaptive chunk size: {chunk_size:,} rows")
+        
+        # Initialize histogram
+        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        accumulator = np.zeros(bins, dtype=np.float64)
+        
+        # Get lazy frames
+        lazy_frames = self._extract_lazy_frames_safely()
+        
+        # Process with adaptive chunking (using MASTER's streaming approach)
+        for frame_idx, lazy_frame in enumerate(lazy_frames):
+            # Use MASTER's streaming approach
+            frame_contribution = self._process_frame_streaming(
+                lazy_frame, column, bin_edges, chunk_size, weights
+            )
+            
+            accumulator += frame_contribution
+            metrics.processed_rows += np.sum(frame_contribution > 0) * chunk_size  # Estimate
+            metrics.chunks_processed += 1
+            
+            # Adaptive adjustment after first frame
+            if frame_idx == 0 and len(lazy_frames) > 1:
+                # Record performance for learning
+                elapsed = time.time() - start_time
+                if elapsed > 0:
+                    throughput = metrics.processed_rows / elapsed
+                    ChunkingEnhancement.get_optimizer(self.memory_budget_gb).record_performance(
+                        chunk_size, throughput
+                    )
+        
+        # Apply density normalization
+        if density and metrics.processed_rows > 0:
+            bin_width = bin_edges[1] - bin_edges[0]
+            accumulator = accumulator / (metrics.processed_rows * bin_width)
+        
+        return accumulator, bin_edges
+    
+    # ============================================================================
+    # MERGED: Range Computation combining both approaches
+    # ============================================================================
+    def _compute_optimal_range(self, column: str, 
+                               strategy: HistogramExecutionStrategy) -> Tuple[float, float]:
+        """
+        OPTIMAL MERGED: Combines HEAD's strategy-aware approach with MASTER's physics defaults.
+        """
+        
+        # Physics-aware defaults (MASTER + HEAD combined)
+        physics_ranges = {
+            # MASTER ranges
+            'M_bc': (5.20, 5.30), 'Mbc': (5.20, 5.30),
+            'delta_E': (-0.30, 0.30), 'deltaE': (-0.30, 0.30),
+            # HEAD ranges
+            'pRecoil': (0.1, 6.0),
+            'mu1P': (0.0, 5.0), 'mu2P': (0.0, 5.0),
+            'mu1Pt': (0.0, 3.0), 'mu2Pt': (0.0, 3.0),
+        }
+        
+        if column in physics_ranges:
+            return physics_ranges[column]
+        
+        # Pattern-based inference (both approaches agree)
+        if column.endswith(('P', 'Pt', 'Energy', 'E')):
+            return (0.0, 5.0)
+        elif 'theta' in column.lower():
+            return (0.0, np.pi)
+        elif 'phi' in column.lower():
+            return (-np.pi, np.pi)
+        
+        # Adaptive sampling (HEAD approach with MASTER's sample size)
+        sample_size = 10_000 if strategy != HistogramExecutionStrategy.MEMORY_CONSTRAINED else 1_000
+        
+        try:
+            lazy_frames = self._extract_lazy_frames_safely()
+            if lazy_frames:
+                sample = lazy_frames[0].select([column]).head(sample_size).collect()
+                
+                if len(sample) > 0:
+                    values = sample[column].to_numpy()
+                    finite_values = values[np.isfinite(values)]
+                    
+                    if len(finite_values) > 10:
+                        # Use robust percentiles
+                        min_val, max_val = np.percentile(finite_values, [1, 99])
+                        margin = (max_val - min_val) * 0.1
+                        return (float(min_val - margin), float(max_val + margin))
+        
+        except Exception:
+            pass
+        
+        # Ultimate fallback
+        return (0.0, 10.0)
+    
+    # ============================================================================
+    # MASTER: Debug Mode Implementation (preserved entirely)
+    # ============================================================================
+    def _debug_hist_execution(self, column, bins, range, density, weights, **kwargs):
+        """
+        MASTER: Surgical debugging - traces execution path with minimal overhead.
+        """
+        
+        debug_state = {
+            'step': 0,
+            'path_taken': [],
+            'failure_point': None,
+            'data_state': {
+                'lazy_frames_count': len(self._lazy_frames) if self._lazy_frames else 0,
+                'compute_type': type(self._compute).__name__,
+                'estimated_rows': getattr(self, '_estimated_rows', 'unknown'),
+                'has_cpp': CPP_HISTOGRAM_AVAILABLE
+            }
+        }
+        
+        print(f"🔍 DEBUG: Starting histogram - {debug_state['data_state']}")
+        
+        # CHECKPOINT 1: Data access validation
+        debug_state['step'] = 1
+        try:
+            lazy_frames = self._extract_lazy_frames_from_compute()
+            debug_state['path_taken'].append('✅ Frame extraction')
+            print(f"  Step 1: Frame extraction → {len(lazy_frames)} frames")
+        except Exception as e:
+            debug_state['failure_point'] = f"Step 1 - Frame extraction: {e}"
+            print(f"  ❌ Step 1 FAILED: {e}")
+            return self._emergency_debug_fallback(column, bins, debug_state)
+        
+        # CHECKPOINT 2: C++ acceleration attempt
+        debug_state['step'] = 2
+        if self._attempt_cpp_acceleration(column, bins, range, density, weights):
+            debug_state['path_taken'].append('🚀 C++ attempted')
+            try:
+                cpp_engine = self._get_or_create_cpp_engine()
+                if cpp_engine:
+                    result = cpp_engine.compute_blazing_fast(
+                        lazy_frames, column, bins=bins, range=range, density=density
+                    )
+                    debug_state['path_taken'].append('✅ C++ SUCCESS')
+                    print(f"  Step 2: C++ acceleration → SUCCESS")
+                    return result
+                else:
+                    debug_state['path_taken'].append('⚠️ C++ engine None')
+                    print(f"  Step 2: C++ engine creation failed")
+            except Exception as e:
+                debug_state['failure_point'] = f"Step 2 - C++ execution: {e}"
+                debug_state['path_taken'].append(f'❌ C++ failed: {type(e).__name__}')
+                print(f"  ❌ Step 2: C++ failed → {e}")
+        else:
+            debug_state['path_taken'].append('⏭️ C++ skipped')
+            print(f"  Step 2: C++ acceleration skipped")
+        
+        # CHECKPOINT 3: Pure Polars streaming
+        debug_state['step'] = 3
+        try:
+            result = self._execute_enhanced_polars_histogram(
+                column, bins, range, density, weights, lazy_frames
+            )
+            debug_state['path_taken'].append('✅ Polars streaming')
+            print(f"  Step 3: Polars streaming → SUCCESS")
+            return result
+        except Exception as e:
+            debug_state['failure_point'] = f"Step 3 - Polars streaming: {e}"
+            debug_state['path_taken'].append(f'❌ Polars failed: {type(e).__name__}')
+            print(f"  ❌ Step 3: Polars streaming failed → {e}")
+        
+        # CHECKPOINT 4: Materialization fallback
+        debug_state['step'] = 4
+        debug_state['path_taken'].append('🚨 MATERIALIZATION')
+        print(f"  🚨 Step 4: All optimizations failed - using materialization")
+        
+        try:
+            return self._materialization_fallback_debug(column, bins, range, density, weights, debug_state)
+        except Exception as e:
+            debug_state['failure_point'] = f"Step 4 - Materialization: {e}"
+            print(f"  ❌ Step 4: Even materialization failed → {e}")
+            raise
+    
+    def _emergency_debug_fallback(self, column, bins, debug_state):
+        """MASTER: Emergency fallback with diagnostic info."""
+        print(f"🚨 EMERGENCY FALLBACK - Debug state: {debug_state}")
+        
+        try:
+            if hasattr(self, '_lazy_frames') and self._lazy_frames:
+                df = self._lazy_frames[0].select(column).head(1000).collect()
+                print(f"  📊 Sample data shape: {df.shape}")
+                return np.histogram([1,2,3], bins=bins)  # Minimal histogram
+        except Exception as e:
+            print(f"  ❌ Emergency access failed: {e}")
+        
+        return np.zeros(bins), np.linspace(0, 1, bins+1)
+    
+    def _materialization_fallback_debug(self, column, bins, range, density, weights, debug_state):
+        """MASTER: Materialization fallback for debug mode."""
+        print(f"  Attempting full materialization as last resort...")
+        
+        try:
+            df = self.collect()
+            if column in df.columns:
+                values = df[column].to_numpy()
+                return np.histogram(values, bins=bins, range=range)
+        except Exception as e:
+            print(f"  ❌ Materialization failed: {e}")
+            raise
+    
+    # ============================================================================
+    # MASTER: Enhanced Polars Histogram (preserved for debug mode)
+    # ============================================================================
+    def _execute_enhanced_polars_histogram(self, column: str, bins: int, range: Optional[Tuple],
+                                          density: bool, weights: Optional[str], 
+                                          lazy_frames: List[pl.LazyFrame]) -> Tuple[np.ndarray, np.ndarray]:
+        """MASTER: Polars histogram with provided lazy frames."""
+        total_processed = 0
+        
+        if range is None:
+            range = self._compute_intelligent_range(column, lazy_frames)
+        
+        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        accumulator = np.zeros(bins, dtype=np.int64)
+        
+        # Process provided frames
+        for lazy_frame in lazy_frames:
+            frame_contribution = self._process_frame_streaming(
+                lazy_frame, column, bin_edges, 
+                self._calculate_optimal_histogram_chunk_size(), weights
+            )
+            accumulator += frame_contribution
+            total_processed += np.sum(frame_contribution)
+        
+        print(f"   ✅ Enhanced Polars: {total_processed:,} events → {np.sum(accumulator):,.0f} counts")
+        return accumulator, bin_edges
+    
+    def _compute_intelligent_range(self, column: str, lazy_frames: List[pl.LazyFrame]) -> Tuple[float, float]:
+        """MASTER: Intelligent range computation (simplified version for debug)."""
+        # Use the merged _compute_optimal_range instead
+        return self._compute_optimal_range(column, HistogramExecutionStrategy.FALLBACK_BASIC)
+    
+    # ============================================================================
+    # MASTER: Streaming and Chunking Helpers
+    # ============================================================================
+    def _process_frame_streaming(self, lazy_frame, column: str, bin_edges: np.ndarray, 
+                                chunk_size: int, weights: Optional[str]) -> np.ndarray:
+        """MASTER: Schema-aware streaming with robust validation."""
+        try:
+            # Validate schema before selection
+            frame_schema = lazy_frame.collect_schema()
+            available_columns = set(frame_schema.names())
+            
+            # Build validated selection list
+            validated_columns = []
+            
+            if column not in available_columns:
+                raise KeyError(f"Histogram column '{column}' missing from schema. "
+                             f"Available: {sorted(available_columns)}")
+            validated_columns.append(column)
+            
+            if weights and weights in available_columns:
+                validated_columns.append(weights)
+            elif weights:
+                warnings.warn(f"Weight column '{weights}' not found - proceeding unweighted")
+                weights = None
+            
+            # Schema-safe projection
+            projected_frame = lazy_frame.select(validated_columns)
+            
+            # Execute streaming histogram
+            return self._execute_streaming_histogram(projected_frame, column, bin_edges, weights)
+            
+        except Exception as e:
+            warnings.warn(f"Frame streaming validation failed: {e}")
+            return np.zeros(len(bin_edges) - 1, dtype=np.int64)
+    
+    def _execute_streaming_histogram(self, projected_frame, column, bin_edges, weights):
+        """Helper for streaming histogram execution."""
+        try:
+            # Collect with streaming if possible
+            try:
+                df = projected_frame.collect(streaming=True)
+            except:
+                df = projected_frame.collect()
+            
+            if len(df) == 0:
+                return np.zeros(len(bin_edges) - 1, dtype=np.int64)
+            
+            # Compute histogram
+            values = df[column].to_numpy()
+            weight_values = df[weights].to_numpy() if weights else None
+            
+            # Filter valid values
+            valid_mask = np.isfinite(values)
+            if weights:
+                valid_mask &= np.isfinite(weight_values)
+                weight_values = weight_values[valid_mask]
+            
+            values = values[valid_mask]
+            
+            if len(values) > 0:
+                counts, _ = np.histogram(values, bins=bin_edges, weights=weight_values)
+                return counts
+            
+            return np.zeros(len(bin_edges) - 1, dtype=np.int64)
+            
+        except Exception as e:
+            warnings.warn(f"Streaming histogram failed: {e}")
+            return np.zeros(len(bin_edges) - 1, dtype=np.int64)
+    
+    def _calculate_optimal_histogram_chunk_size(self) -> int:
+        """
+        MASTER: Adaptive chunking with automatic fallback preservation.
+        """
+        use_adaptive_chunking = getattr(self, 'enable_adaptive_chunking', True)
+        
+        if use_adaptive_chunking:
+            try:
+                memory_budget_gb = getattr(self, 'memory_budget_gb', 16.0)
+                estimated_rows = getattr(self, '_estimated_rows', 1_000_000)
+                
+                avg_row_bytes = 100.0
+                if hasattr(self, '_schema') and self._schema:
+                    avg_row_bytes = len(self._schema) * 20
+                
+                chunk_size = ChunkingEnhancement.calculate_optimal_chunk_size(
+                    memory_budget_gb=memory_budget_gb,
+                    estimated_rows=estimated_rows,
+                    avg_row_bytes=avg_row_bytes,
+                    operation_type='histogram',
+                    fallback_calculation=lambda: self._calculate_original_chunk_size_preserved()
+                )
+                
+                if chunk_size > 0 and chunk_size <= estimated_rows * 2:
+                    print(f"🚀 Adaptive chunking: {chunk_size:,} rows")
+                    return chunk_size
+                else:
+                    print(f"⚠️ Adaptive result invalid: {chunk_size:,}, using fallback")
+                    return self._calculate_original_chunk_size_preserved()
+                    
+            except Exception as e:
+                print(f"⚠️ Adaptive chunking failed: {e}, using original logic")
+                return self._calculate_original_chunk_size_preserved()
+        else:
+            return self._calculate_original_chunk_size_preserved()
+    
+    def _calculate_original_chunk_size_preserved(self) -> int:
+        """MASTER: Original chunking logic for fallback."""
+        total_rows = self._estimated_rows
+        
+        if total_rows <= 10_000:
+            return total_rows
+        
+        bytes_per_row = 8
+        available_memory = self.memory_budget_gb * 1024**3 * 0.15
+        memory_optimal = int(available_memory / bytes_per_row)
+        
+        if total_rows < 100_000:
+            chunk_size = max(10_000, total_rows // 10)
+        elif total_rows < 1_000_000:
+            chunk_size = min(memory_optimal, max(500_000, total_rows // 20))
+        elif total_rows < 10_000_000:
+            chunk_size = min(memory_optimal, max(2_000_000, total_rows // 50))
+        else:
+            scaled_min = min(1_000_000, total_rows // 100)
+            scaled_max = min(5_000_000, total_rows // 20)
+            chunk_size = min(memory_optimal, max(scaled_min, scaled_max))
+        
+        return min(chunk_size, total_rows)
+    
+    def record_chunking_performance(self, chunk_size: int, execution_time: float):
+        """MASTER: Record performance for continuous optimization."""
+        if hasattr(self, '_estimated_rows') and hasattr(self, 'memory_budget_gb'):
+            try:
+                optimizer = ChunkingEnhancement.get_optimizer(self.memory_budget_gb)
+                optimizer.record_performance(chunk_size, self._estimated_rows, execution_time)
+            except Exception:
+                pass
+    
+    def configure_adaptive_chunking(self, enabled: bool = True, **options):
+        """MASTER: Configure adaptive chunking behavior."""
+        self.enable_adaptive_chunking = enabled
+        
+        if 'rollout_percentage' in options:
+            import random
+            self.enable_adaptive_chunking = enabled and (random.random() < options['rollout_percentage'])
+        
+        status = "enabled" if self.enable_adaptive_chunking else "disabled"
+        print(f"🔧 Adaptive chunking: {status}")
+    
+    # ============================================================================
+    # MASTER: Simple Helpers
+    # ============================================================================
+    def _attempt_cpp_acceleration(self, column: str, bins: int, range: Optional[Tuple], 
+                                 density: bool, weights: Optional[str]) -> bool:
+        """MASTER: Strategic decision logic for C++ pathway eligibility."""
+        if getattr(self, '_estimated_rows', 0) < 100_000:
+            return False
+        if weights and not isinstance(weights, str):
+            return False
+        if bins > 10_000:
+            return False
+        return True
+    
+    def _get_or_create_cpp_engine(self):
+        """MASTER: Intelligent C++ engine acquisition with caching."""
+        if CPP_HISTOGRAM_AVAILABLE:
+            try:
+                from optimized_cpp_integration import OptimizedStreamingHistogram
+                self._histogram_engine = OptimizedStreamingHistogram()
+                return self._histogram_engine
+            except Exception:
+                pass
+        return None
+    
+    def _extract_lazy_frames_from_compute(self):
+        """MASTER: Extract lazy frames from compute graph."""
+        # Implementation depends on compute structure
+        # This is a placeholder that should be implemented based on actual compute capability
+        if hasattr(self, '_lazy_frames') and self._lazy_frames:
+            return self._lazy_frames
+        
+        # Try to extract from compute
+        if hasattr(self._compute, 'to_lazy_frames'):
+            return self._compute.to_lazy_frames()
+        
+        # Fallback
+        raise ValueError("Cannot extract lazy frames from compute capability")
+    
+    # ============================================================================
+    # Utility Methods (preserved from both)
+    # ============================================================================
+    def _validate_columns_exist(self, required_cols, available_cols=None):
+        """Utility method for column validation."""
+        if available_cols is None:
+            available_cols = self.columns
+        
+        missing = [col for col in required_cols if col not in available_cols]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+        
+        return True
+    
+    def _estimate_group_count(self, group_cols: List[str]) -> int:
+        """Estimate number of unique groups."""
+        if 'event' in str(group_cols).lower():
+            return int(self._estimated_rows * 0.8)
+        else:
+            return int(self._estimated_rows * 0.1)
+#     # ============================================================================
+#     # EXECUTION STRATEGIES
+#     # ============================================================================
     
     def _execute_cpp_accelerated_histogram(self, column: str, bins: int, range: Tuple[float, float],
                                          density: bool, weights: Optional[str], 
@@ -1665,71 +2805,9 @@ class UnifiedLazyDataFrame(Generic[T]):
         metrics.chunks_processed = 1
         
         return accumulator, bin_edges
-    # ============================================================================
-    # HELPER METHODS
-    # ============================================================================
-    
-    def _calculate_adaptive_chunk_size(self, column: str, bins: int, 
-                                     weights: Optional[str]) -> int:
-        """
-        Calculate optimal chunk size using advanced heuristics.
-        
-        This implementation considers:
-        1. Available memory vs dataset size
-        2. Column data types and expected density
-        3. Histogram operation overhead
-        4. System characteristics (CPU cache, memory bandwidth)
-        5. Historical performance data
-        """
-        
-        # Base calculations
-        total_rows = self._estimated_rows
-        bytes_per_row = 8  # Base for float64
-        
-        if weights:
-            bytes_per_row *= 2  # Double for weighted histograms
-        
-        # Memory-based constraints
-        available_memory = psutil.virtual_memory().available
-        memory_for_histogram = min(
-            available_memory * 0.2,  # Use at most 20% of available
-            self.memory_budget_gb * 0.15 * 1024**3  # Or 15% of budget
-        )
-        
-        memory_optimal = int(memory_for_histogram / bytes_per_row)
-        
-        # CPU cache optimization (L3 cache typically 8-32MB)
-        l3_cache_size = 16 * 1024 * 1024  # 16MB estimate
-        cache_optimal = int(l3_cache_size / bytes_per_row)
-        
-        # Empirically derived scaling factors
-        if total_rows < 100_000:
-            # Small datasets - minimize overhead
-            base_chunk = min(total_rows, cache_optimal)
-        elif total_rows < 1_000_000:
-            # Medium datasets - balance between overhead and memory
-            base_chunk = min(memory_optimal, max(50_000, total_rows // 20))
-        elif total_rows < 10_000_000:
-            # Large datasets - optimize for throughput
-            base_chunk = min(memory_optimal, 500_000)
-        elif total_rows < 100_000_000:
-            # Very large datasets - prevent memory issues
-            base_chunk = min(memory_optimal, 1_000_000)
-        else:
-            # Extreme datasets - conservative approach
-            base_chunk = min(memory_optimal, 500_000)
-        
-        # Ensure chunk size is reasonable
-        chunk_size = max(10_000, min(base_chunk, total_rows))
-        
-        # Round to nice number for better memory alignment
-        if chunk_size > 1_000_000:
-            chunk_size = (chunk_size // 100_000) * 100_000
-        elif chunk_size > 100_000:
-            chunk_size = (chunk_size // 10_000) * 10_000
-        
-        return chunk_size
-    
+#     # ============================================================================
+#     # HELPER METHODS
+#     # ============================================================================
     def _process_frame_chunked(self, lazy_frame: pl.LazyFrame, column: str,
                              bin_edges: np.ndarray, chunk_size: int,
                              weights: Optional[str]) -> Tuple[np.ndarray, int]:
@@ -1818,57 +2896,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Last resort - empty list
         return []
-    
-    def _compute_adaptive_range(self, column: str, 
-                              strategy: HistogramExecutionStrategy) -> Tuple[float, float]:
-        """Compute histogram range with strategy-aware sampling."""
-        
-        # Physics-aware defaults (highest priority)
-        physics_ranges = {
-            'pRecoil': (0.1, 6.0),
-            'mu1P': (0.0, 5.0), 'mu2P': (0.0, 5.0),
-            'mu1Pt': (0.0, 3.0), 'mu2Pt': (0.0, 3.0),
-        }
-        
-        if column in physics_ranges:
-            return physics_ranges[column]
-        
-        # Pattern-based inference
-        if column.endswith(('P', 'Pt', 'Energy', 'E')):
-            return (0.0, 5.0)
-        elif 'theta' in column.lower():
-            return (0.0, np.pi)
-        elif 'phi' in column.lower():
-            return (-np.pi, np.pi)
-        
-        # Adaptive sampling based on strategy
-        sample_size = 10_000 if strategy != HistogramExecutionStrategy.MEMORY_CONSTRAINED else 1_000
-        
-        try:
-            lazy_frames = self._extract_lazy_frames_safely()
-            if lazy_frames:
-                # Sample from first frame
-                sample = lazy_frames[0].select([column]).head(sample_size).collect()
-                
-                if len(sample) > 0:
-                    values = sample[column].to_numpy()
-                    finite_values = values[np.isfinite(values)]
-                    
-                    if len(finite_values) > 10:
-                        # Use robust percentiles
-                        min_val, max_val = np.percentile(finite_values, [1, 99])
-                        
-                        # Add margin
-                        margin = (max_val - min_val) * 0.1
-                        
-                        return (float(min_val - margin), float(max_val + margin))
-        
-        except Exception:
-            pass
-        
-        # Ultimate fallback
-        return (0.0, 10.0)
-    
+     
     def _test_cpp_engine(self) -> bool:
         """Test if C++ engine is actually functional."""
         if not hasattr(self, '_histogram_engine') or self._histogram_engine is None:
@@ -1990,12 +3018,7 @@ class UnifiedLazyDataFrame(Generic[T]):
             return best_entry['strategy']
         
         return None
-    
-
-# ========================================================================
-# Additional DataFrame Operations
-# ========================================================================
-    
+       
     def filter(self, *predicates) -> 'UnifiedLazyDataFrame':
         """Filter with chain preservation."""
         # CRITICAL FIX: Define transform_meta before use

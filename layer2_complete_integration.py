@@ -90,6 +90,8 @@ class Belle2Layer2Framework:
         self.memory_budget_gb = memory_budget_gb
         self.enable_cpp_acceleration = enable_cpp_acceleration
         self.cache_dir = Path(cache_dir) if cache_dir else Path.home() / '.belle2_cache'
+        self._variable_labels = self._init_variable_labels()
+        self._custom_labels = {}
         
         # Ensure cache directory exists
         self.cache_dir.mkdir(exist_ok=True)
@@ -105,9 +107,9 @@ class Belle2Layer2Framework:
         ╔════════════════════════════════════════════════════╗
         ║          Belle II Layer 2 Framework                ║
         ║                                                    ║
-        ║  Memory Budget: {memory_budget_gb:>5.1f} GB                     ║
-        ║  C++ Acceleration: {'Enabled' if enable_cpp_acceleration else 'Disabled':>8}                 ║
-        ║  Cache Directory: {str(self.cache_dir):>33}║
+        ║  Memory Budget: {memory_budget_gb:>5.1f} GB        ║
+        ║  C++ Acceleration: {'Enabled' if enable_cpp_acceleration else 'Disabled':>8}
+        ║  Cache Directory: {str(self.cache_dir):>33}        ║
         ╚════════════════════════════════════════════════════╝
         """)
     
@@ -166,7 +168,8 @@ class Belle2Layer2Framework:
         df = create_dataframe_from_parquet(
             path,
             engine='auto',
-            memory_budget_gb=self.memory_budget_gb
+            memory_budget_gb=self.memory_budget_gb,
+            histogram_engine=self._cpp_histogram 
         )
         
         # Apply column selection if specified
@@ -290,7 +293,7 @@ class Belle2Layer2Framework:
         
         return result
     
-    def select_best_candidates(self,
+    def oneCandOnly(self,
                              data: Union[UnifiedLazyDataFrame, OptimizedUltraLazyDict],
                              group_cols: Optional[List[str]] = None,
                              sort_col: Optional[str] = None,
@@ -302,16 +305,9 @@ class Belle2Layer2Framework:
         candidates exist per event and we need to select the best one.
         """
         print("🎯 Selecting best candidates...")
-        
-        if isinstance(data, UnifiedLazyDataFrame):
-            result = data.oneCandOnly(group_cols, sort_col, ascending)
-        else:
-            result = data.oneCandOnly(group_cols, sort_col, ascending)
-        
+        result = data.oneCandOnly(group_cols, sort_col, ascending)
         print("✅ Best candidate selection complete")
-        
         self._operation_count += 1
-        
         return result
     
     def apply_cuts(self,
@@ -650,7 +646,7 @@ def quick_analysis(data_path: str,
     df_cut = framework.apply_cuts(df, cuts)
     
     # Select best candidates
-    df_best = framework.select_best_candidates(df_cut)
+    df_best = framework.oneCandOnly(df_cut)
     
     # Compute histogram
     counts, edges = framework.compute_histogram(df_best, histogram_column, bins=bins)
