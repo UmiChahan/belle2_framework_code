@@ -1,0 +1,256 @@
+{
+  "summary": {
+    "total_tests": 17,
+    "passed": 3,
+    "failed": 14,
+    "success_rate": 0.17647058823529413,
+    "total_time": 0.09282445907592773,
+    "total_memory_mb": 0.0
+  },
+  "failures": [
+    {
+      "test": "basic_histogram",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 187, in test_basic_histogram\n    counts, edges = process.hist('pRecoil', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "weighted_histogram",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 216, in test_weighted_histogram\n    counts_weighted, edges = process.hist('pRecoil', bins=50, apply_weight=True)\n                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "cpp_acceleration",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 251, in test_cpp_acceleration\n    counts_cpp, edges_cpp = process.hist('pRecoil', bins=100)\n                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "delta_before_hist",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 328, in test_delta_columns_before_histogram\n    counts, edges = process_with_delta.hist('absdPhi', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "delta_after_query",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 355, in test_delta_columns_after_query\n    counts, edges = with_delta.hist('absdPhi', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "delta_memory_impact",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 427, in test_delta_memory_impact\n    counts, edges = with_delta.hist('pRecoil', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "query_delta_hist_chain",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 474, in test_query_delta_histogram_chain\n    counts, edges = step3.hist('pRecoil', bins=75)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "onecand_delta_hist",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 512, in test_onecand_delta_histogram\n    counts, edges = one_cand.hist('absdPhi', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "broadcast_histogram",
+      "error": "cannot unpack non-iterable NoneType object",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 541, in test_broadcast_histogram\n    for name, (counts, edges) in hist_results.items():\n              ^^^^^^^^^^^^^^^\nTypeError: cannot unpack non-iterable NoneType object\n"
+    },
+    {
+      "test": "empty_data_histogram",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 566, in test_empty_data_histogram\n    counts, edges = empty.hist('pRecoil', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "nan_handling",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 591, in test_nan_handling_in_histogram\n    counts, edges = with_delta.hist('absdAlpha1', bins=50)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "extreme_values",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 608, in test_extreme_value_handling\n    counts_large, edges_large = process.hist('pRecoil', bins=10000)\n                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "chunking_efficiency",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 644, in test_chunking_efficiency\n    counts, edges = process.hist('pRecoil', bins=100)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    },
+    {
+      "test": "memory_spilling",
+      "error": "ADAPTIVE_CHUNKED",
+      "trace": "Traceback (most recent call last):\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 125, in diagnostic_context\n    yield result\n  File \"/tmp/ipykernel_789203/1788677033.py\", line 668, in test_memory_spilling_behavior\n    counts, edges = process.hist('pRecoil', bins=1000)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/belle2_enhanced_framework.py\", line 133, in hist\n    counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 1922, in hist\n    strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/gpfs/group/belle2/users2022/kyldem/photoneff_updated/belle2_framework_code/layer2_unified_lazy_dataframe.py\", line 2059, in _select_optimal_histogram_strategy_merged\n    return HistogramExecutionStrategy.ADAPTIVE_CHUNKED\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/cvmfs/belle.cern.ch/el9/externals/v02-03-02/Linux_x86_64/common/lib/python3.11/enum.py\", line 786, in __getattr__\n    raise AttributeError(name) from None\nAttributeError: ADAPTIVE_CHUNKED\n"
+    }
+  ],
+  "warnings": [],
+  "performance": [],
+  "detailed_results": [
+    {
+      "test": "basic_histogram",
+      "passed": false,
+      "time": 0.001474142074584961,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "weighted_histogram",
+      "passed": false,
+      "time": 0.0007560253143310547,
+      "memory_mb": 0.0,
+      "metrics": {
+        "initial_weight": 0.2499999367181442
+      },
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "cpp_acceleration",
+      "passed": false,
+      "time": 0.0006234645843505859,
+      "memory_mb": 0.0,
+      "metrics": {
+        "cpp_available": true
+      },
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "histogram_strategies",
+      "passed": true,
+      "time": 0.00017762184143066406,
+      "memory_mb": 0.0,
+      "metrics": {
+        "strategies_tested": []
+      },
+      "warnings": [],
+      "error": null
+    },
+    {
+      "test": "delta_before_hist",
+      "passed": false,
+      "time": 0.0010402202606201172,
+      "memory_mb": 0.0,
+      "metrics": {
+        "delta_columns_created": 0,
+        "delta_column_names": []
+      },
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "delta_after_query",
+      "passed": false,
+      "time": 0.001451253890991211,
+      "memory_mb": 0.0,
+      "metrics": {
+        "rows_after_query": 6599880
+      },
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "delta_compute_graph",
+      "passed": true,
+      "time": 0.0008091926574707031,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": null
+    },
+    {
+      "test": "delta_memory_impact",
+      "passed": false,
+      "time": 0.06287288665771484,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "query_delta_hist_chain",
+      "passed": false,
+      "time": 0.001931905746459961,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "onecand_delta_hist",
+      "passed": false,
+      "time": 0.0012021064758300781,
+      "memory_mb": 0.0,
+      "metrics": {
+        "rows_before_onecand": 13199761,
+        "rows_after_onecand": 2639952
+      },
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "broadcast_histogram",
+      "passed": false,
+      "time": 0.01595473289489746,
+      "memory_mb": 0.0,
+      "metrics": {
+        "processes_computed": 13,
+        "successful_hists": 0
+      },
+      "warnings": [],
+      "error": "cannot unpack non-iterable NoneType object"
+    },
+    {
+      "test": "empty_data_histogram",
+      "passed": false,
+      "time": 0.0013053417205810547,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "nan_handling",
+      "passed": false,
+      "time": 0.0008747577667236328,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "extreme_values",
+      "passed": false,
+      "time": 0.0006453990936279297,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "chunking_efficiency",
+      "passed": false,
+      "time": 0.0007567405700683594,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "memory_spilling",
+      "passed": false,
+      "time": 0.0007610321044921875,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": "ADAPTIVE_CHUNKED"
+    },
+    {
+      "test": "parallel_histogram",
+      "passed": true,
+      "time": 0.0001876354217529297,
+      "memory_mb": 0.0,
+      "metrics": {},
+      "warnings": [],
+      "error": null
+    }
+  ]
+}

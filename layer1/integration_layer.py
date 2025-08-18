@@ -17,13 +17,14 @@ import functools
 import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Union, Callable, Tuple, TypeVar
+from typing import Any, Dict, List, Optional, Union, Callable, Tuple, TypeVar, Generic
 import numpy as np
 import polars as pl
 from pathlib import Path
 import warnings
 
-from layer0 import ComputeCapability
+from layer0 import ComputeCapability, ComputeNode
+T = TypeVar('T')
 # ============================================================================
 # Import our new engines
 from layer1.lazy_compute_engine import LazyComputeEngine
@@ -336,9 +337,9 @@ class EnhancedBlazingCore:
         return EnhancedBlazingCore(new_original, self._adapter)
 
 
-class MonitoredCapability(ComputeCapability[T]):
+class MonitoredCapability(Generic[T]):
     """
-    Wrapper that monitors capability execution for diagnostics.
+    Monitored proxy for ComputeCapability with complete protocol implementation.
     
     This implements the Proxy pattern to add monitoring without modifying
     the underlying capability implementation.
@@ -346,7 +347,7 @@ class MonitoredCapability(ComputeCapability[T]):
     
     def __init__(self, 
                  base_capability: ComputeCapability[T],
-                 adapter: ComputeEngineAdapter):
+                 adapter: 'ComputeEngineAdapter'):
         self._base = base_capability
         self._adapter = adapter
         self._execution_count = 0
@@ -380,19 +381,75 @@ class MonitoredCapability(ComputeCapability[T]):
             self._adapter.operation_history.append(('materialize_failure', (duration, str(e))))
             raise
     
-    # Delegate other methods
-    def partition_compute(self, partitioner: Callable[[T], Dict[str, T]]) -> Dict[str, ComputeCapability[T]]:
-        return self._base.partition_compute(partitioner)
+    def partition_compute(self, strategy: str = 'auto') -> List[ComputeCapability[T]]:
+        """Delegate partitioning to base capability."""
+        # Note: Updated signature to match protocol
+        partitions = self._base.partition_compute(strategy)
+        
+        # Wrap each partition with monitoring
+        monitored_partitions = []
+        for partition in partitions:
+            monitored_partitions.append(MonitoredCapability(partition, self._adapter))
+        
+        self._adapter.operation_history.append(('partition', len(partitions)))
+        return monitored_partitions
     
-    def get_compute_graph(self):
+    def get_compute_graph(self) -> ComputeNode:
+        """Return the underlying compute graph."""
         return self._base.get_compute_graph()
     
     def estimate_memory(self) -> int:
+        """Estimate memory requirements."""
         return self._base.estimate_memory()
     
     def is_materialized(self) -> bool:
+        """Check if the capability has been materialized."""
         return self._base.is_materialized()
-
+    
+    def cache(self) -> 'MonitoredCapability[T]':
+        """
+        Mark this capability for caching.
+        
+        Returns a monitored wrapper around the cached base capability.
+        """
+        # Record caching operation
+        self._adapter.operation_history.append(('cache', self._execution_count))
+        
+        # Delegate caching to base
+        cached_base = self._base.cache()
+        
+        # Return monitored wrapper if base changed, otherwise self
+        if cached_base is self._base:
+            return self
+        else:
+            return MonitoredCapability(cached_base, self._adapter)
+    
+    def compose(self, other: ComputeCapability) -> 'MonitoredCapability':
+        """
+        Compose with another compute capability.
+        
+        Creates a new composed capability with monitoring preserved.
+        """
+        # Unwrap if other is also monitored
+        other_base = other
+        if isinstance(other, MonitoredCapability):
+            other_base = other._base
+            # Merge operation histories if both are monitored
+            if hasattr(other, '_adapter'):
+                self._adapter.operation_history.extend(other._adapter.operation_history)
+        
+        # Record composition
+        self._adapter.operation_history.append(('compose', type(other).__name__))
+        
+        # Delegate composition to base
+        composed_base = self._base.compose(other_base)
+        
+        # Return monitored wrapper
+        return MonitoredCapability(composed_base, self._adapter)
+    
+    def __repr__(self) -> str:
+        """String representation for debugging."""
+        return f"MonitoredCapability(base={type(self._base).__name__}, executions={self._execution_count})"
 
 # ============================================================================
 # Framework Enhancement

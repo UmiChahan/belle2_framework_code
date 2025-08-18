@@ -626,6 +626,10 @@ def get_cpp_accelerator() -> EnhancedCppAccelerator:
 # Integration module for easy import
 class cpp_histogram_integrator:
     """Drop-in replacement for C++ histogram integrator."""
+    @classmethod
+    def lib(cls):
+        """Delegate to singleton instance."""
+        return get_cpp_accelerator().lib
     
     @staticmethod
     def compute_histogram_parallel(data: np.ndarray, min_val: float, 

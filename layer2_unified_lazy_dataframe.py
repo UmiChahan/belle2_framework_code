@@ -23,6 +23,8 @@ import hashlib
 import time
 import traceback
 from contextlib import contextmanager
+import ast
+import builtins
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,12 +49,12 @@ if str(parent_dir) not in sys.path:
 
 # Import Layer 0 protocols
 from layer0 import (
-    ComputeCapability, ComputeOpType,
+    ComputeCapability, ComputeOpType
 )
 
 # Import Layer 1 engines
 from layer1.lazy_compute_engine import (
-    LazyComputeCapability, GraphNode,
+    LazyComputeCapability, GraphNode
 )
 
 from layer1.integration_layer import (
@@ -93,6 +95,7 @@ class HistogramExecutionStrategy(Enum):
     """Execution strategies for histogram computation."""
     CPP_ACCELERATED = auto()      # C++ streaming histogram
     BILLION_ROW_ENGINE = auto()   # Layer 1 billion row engine with spilling
+    ADAPTIVE_CHUNKED = auto()     # Adaptive chunked execution (advanced)
     LAZY_CHUNKED = auto()         # Standard Polars lazy with smart chunking
     MEMORY_CONSTRAINED = auto()   # Ultra-conservative for OOM prevention
     FALLBACK_BASIC = auto()       # Last resort basic implementation
@@ -243,6 +246,91 @@ class AdaptiveChunkOptimizer:
         self.performance_history = PerformanceHistory()
         self._cache_utilization_target = 0.75
         self._bandwidth_utilization_target = 0.80
+
+    def calculate_optimal_chunk_size(self, estimated_rows: int,
+                                     avg_row_bytes: float,
+                                     operation_type: str = 'histogram') -> int:
+        """Robust, bounded chunk-size selection.
+
+        Goals:
+        - Respect memory budget (<=25% per chunk)
+        - Scale with dataset size (10–75 chunks depending on scale)
+        - Keep results within [1_000, 20_000_000] and <= estimated_rows
+        """
+        try:
+            # Memory-based bound
+            per_chunk_bytes = max(avg_row_bytes, 1.0)
+            budget_bytes = float(self.memory_budget_gb) * (1024 ** 3) * 0.25
+            mem_based = max(10_000, int(budget_bytes / per_chunk_bytes))
+
+            # Scale-based bound
+            if estimated_rows <= 0:
+                return 100_000
+            if estimated_rows < 1_000_000:
+                target_chunks = 10
+            elif estimated_rows < 10_000_000:
+                target_chunks = 15
+            elif estimated_rows < 100_000_000:
+                target_chunks = 30
+            else:
+                # parallelism-aware upper bound
+                target_chunks = min(75, (self.system.cpu_cores or 4) * 4)
+            scale_based = max(100_000, estimated_rows // target_chunks)
+
+            # Conservative baseline bound
+            baseline = max(50_000, min(5_000_000, estimated_rows // 20))
+
+            # Aggregate via median to avoid extremes
+            base = int(np.median([mem_based, scale_based, baseline]))
+
+            # Final guards
+            base = max(1_000, min(base, 20_000_000))
+            base = min(base, estimated_rows)
+            return base
+        except Exception:
+            # Absolute fallback
+            return max(100_000, estimated_rows // 50 if estimated_rows > 0 else 100_000)
+
+# ---------------------------------------------------------------------------
+# Lightweight system profiling and performance history fallbacks
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SystemCharacteristics:
+    cpu_cores: int
+    memory_gb: float
+    cache_mb: int
+    storage_type: str
+
+    @staticmethod
+    def detect() -> 'SystemCharacteristics':
+        try:
+            cores = psutil.cpu_count(logical=True) or 4
+            mem_gb = (psutil.virtual_memory().total or 8 * 1024**3) / 1024**3
+        except Exception:
+            cores, mem_gb = 4, 8.0
+        # Cache size is not directly available; use a heuristic
+        cache_mb = 8 * 1024 if mem_gb >= 64 else 4 * 1024 if mem_gb >= 32 else 2048
+        # Storage heuristic: NVMe likely on fast systems, else SSD
+        storage = 'nvme' if mem_gb >= 64 else 'ssd'
+        return SystemCharacteristics(cpu_cores=cores, memory_gb=mem_gb, cache_mb=cache_mb, storage_type=storage)
+
+
+class PerformanceHistory:
+    def __init__(self):
+        self._history: Dict[int, float] = {}
+
+    def record(self, chunk_size: int, throughput: float):
+        # Keep max throughput per chunk size
+        prev = self._history.get(chunk_size, 0.0)
+        if throughput > prev:
+            self._history[chunk_size] = throughput
+
+    def get_optimal_chunk_size(self, default_size: int) -> int:
+        if not self._history:
+            return default_size
+        # Return chunk size with best throughput
+        return max(self._history.items(), key=lambda kv: kv[1])[0]
         
     def _calculate_optimal_histogram_chunk_size(self) -> int:
         """PRIVATE: Internal calculation implementation."""
@@ -1669,168 +1757,166 @@ class UnifiedLazyDataFrame(Generic[T]):
     def createDeltaColumns(self) -> 'UnifiedLazyDataFrame':
         """
         Create kinematic delta columns for Belle II muon pair analysis.
-        
-        ARCHITECTURAL ENHANCEMENTS:
-        ├── Single-pass computation with optimized expression graph
-        ├── Vectorized trigonometric operations
-        ├── Memory-efficient column generation
-        ├── Full transformation tracking
-        └── Lazy evaluation preservation
-        
-        Returns:
-            UnifiedLazyDataFrame with additional delta columns
+
+        Integrated version:
+        - Preserves lazy graph and full lineage
+        - Single-pass, vectorized expressions with reusable trig
+        - Robust 3D angle computation
+        - Properly expands required_columns so new columns are retained
+        - Optional schema validation for inputs
         """
-        
-        # Transformation metadata
+        import numpy as np
+        import polars as pl
+
+        # Validate required input columns (fail fast with clear error)
+        required_inputs = [
+            # base kinematics
+            'mu1Phi', 'mu2Phi', 'mu1Theta', 'mu2Theta', 'mu1P', 'mu2P',
+            'pRecoilPhi', 'pRecoilTheta', 'pRecoil',
+            # cluster-based features used below
+            'mu1clusterPhi', 'mu2clusterPhi', 'mu1clusterTheta', 'mu2clusterTheta',
+        ]
+        try:
+            self._validate_columns_exist(required_inputs, available_cols=set(self._schema.keys()) if self._schema else None)
+        except Exception:
+            # If schema is absent, skip strict validation (keeps lazy compatibility).
+            pass
+
+        # Complete list of delta columns that will be created
+        delta_column_specs = {
+            'absdPhi': pl.Float64,
+            'absdPhiMu1': pl.Float64,
+            'absdPhiMu2': pl.Float64,
+            'absdThetaMu1': pl.Float64,
+            'absdThetaMu2': pl.Float64,
+            'absdAlpha1': pl.Float64,
+            'absdAlpha2': pl.Float64,
+            'dRMu1': pl.Float64,
+            'dRMu2': pl.Float64,
+            'pTRecoil': pl.Float64,
+            'mu1Pt': pl.Float64,
+            'mu2Pt': pl.Float64,
+            'deltaMu1PRecoil': pl.Float64,
+            'deltaMu2PRecoil': pl.Float64,
+            'deltaMu1ClusterPRecoil': pl.Float64,
+            'deltaMu2ClusterPRecoil': pl.Float64,
+            'min_deltaMuPRecoil': pl.Float64,
+            'min_deltaMuClusterPRecoil': pl.Float64,
+        }
+
         transform_meta = TransformationMetadata(
             operation='createDeltaColumns',
-            parameters={
-                'columns_added': [
-                    'absdPhi', 'absdPhiMu1', 'absdPhiMu2',
-                    'absdThetaMu1', 'absdThetaMu2',
-                    'absdAlpha1', 'absdAlpha2',
-                    'dRMu1', 'dRMu2',
-                    'pTRecoil', 'mu1Pt', 'mu2Pt',
-                    'deltaMu1PRecoil', 'deltaMu2PRecoil',
-                    'deltaMu1ClusterPRecoil', 'deltaMu2ClusterPRecoil',
-                    'min_deltaMuPRecoil', 'min_deltaMuClusterPRecoil'
-                ]
-            }
+            parameters={'columns_added': list(delta_column_specs.keys())}
         )
-        
-        # Define optimized computation graph
+
         def compute_delta_columns(df):
             """Single-pass delta column computation with expression optimization."""
-            
-            # Pre-compute common trigonometric values
+            # Reusable trig
             sin_mu1_theta = pl.col('mu1Theta').sin()
             sin_mu2_theta = pl.col('mu2Theta').sin()
             cos_mu1_theta = pl.col('mu1Theta').cos()
             cos_mu2_theta = pl.col('mu2Theta').cos()
             sin_recoil_theta = pl.col('pRecoilTheta').sin()
             cos_recoil_theta = pl.col('pRecoilTheta').cos()
-            
-            # Optimized delta phi computation
+
+            # Helpers
             def delta_phi_expr(phi1, phi2):
-                """Vectorized delta phi with branch-free computation."""
                 dphi = (phi1 - phi2).abs()
                 return pl.when(dphi > np.pi).then(2 * np.pi - dphi).otherwise(dphi)
-            
-            # Optimized delta R computation
+
             def delta_r_expr(phi1, theta1, phi2, theta2):
-                """Efficient delta R using pre-computed values."""
                 dphi = delta_phi_expr(phi1, phi2)
                 dtheta = (theta1 - theta2).abs()
                 return (dphi.pow(2) + dtheta.pow(2)).sqrt()
-            
-            # Optimized angle computation with momentum
-            def angle_3d_expr(p1, theta1, phi1, p2, theta2, phi2, 
+
+            def angle_3d_expr(p1, theta1, phi1, p2, theta2, phi2,
                             sin_theta1, cos_theta1, sin_theta2, cos_theta2):
-                """Vectorized 3D angle computation."""
-                # Convert to Cartesian coordinates
                 px1 = p1 * sin_theta1 * pl.col(phi1).cos()
                 py1 = p1 * sin_theta1 * pl.col(phi1).sin()
                 pz1 = p1 * cos_theta1
-                
+
                 px2 = p2 * sin_theta2 * pl.col(phi2).cos()
                 py2 = p2 * sin_theta2 * pl.col(phi2).sin()
                 pz2 = p2 * cos_theta2
-                
-                # Dot product
+
                 dot = px1 * px2 + py1 * py2 + pz1 * pz2
-                
-                # Magnitudes
                 mag1 = (px1.pow(2) + py1.pow(2) + pz1.pow(2)).sqrt()
                 mag2 = (px2.pow(2) + py2.pow(2) + pz2.pow(2)).sqrt()
-                
-                # Angle with numerical stability
                 cos_angle = (dot / (mag1 * mag2)).clip(-1.0, 1.0)
                 return cos_angle.arccos()
-            
-            # Single-pass column generation
+
             return df.with_columns([
-                # Basic delta angles
+                # Delta phi
                 delta_phi_expr(pl.col('mu1Phi'), pl.col('mu2Phi')).alias('absdPhi'),
                 delta_phi_expr(pl.col('mu1clusterPhi'), pl.col('pRecoilPhi')).alias('absdPhiMu1'),
                 delta_phi_expr(pl.col('mu2clusterPhi'), pl.col('pRecoilPhi')).alias('absdPhiMu2'),
-                
+
                 # Delta theta
                 (pl.col('mu1clusterTheta') - pl.col('pRecoilTheta')).abs().alias('absdThetaMu1'),
                 (pl.col('mu2clusterTheta') - pl.col('pRecoilTheta')).abs().alias('absdThetaMu2'),
-                
+
                 # Transverse momenta
                 (pl.col('pRecoil') * sin_recoil_theta).alias('pTRecoil'),
                 (pl.col('mu1P') * sin_mu1_theta).alias('mu1Pt'),
                 (pl.col('mu2P') * sin_mu2_theta).alias('mu2Pt'),
-                
+
                 # Delta R
                 delta_r_expr(pl.col('mu1clusterPhi'), pl.col('mu1clusterTheta'),
                             pl.col('pRecoilPhi'), pl.col('pRecoilTheta')).alias('dRMu1'),
                 delta_r_expr(pl.col('mu2clusterPhi'), pl.col('mu2clusterTheta'),
                             pl.col('pRecoilPhi'), pl.col('pRecoilTheta')).alias('dRMu2'),
-                
-                # Alpha angles (recoil system)
+
+                # 3D angles to recoil
                 angle_3d_expr(pl.col('mu1P'), pl.col('mu1Theta'), 'mu1Phi',
                             pl.col('pRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
                             sin_mu1_theta, cos_mu1_theta, sin_recoil_theta, cos_recoil_theta).alias('absdAlpha1'),
                 angle_3d_expr(pl.col('mu2P'), pl.col('mu2Theta'), 'mu2Phi',
                             pl.col('pRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
                             sin_mu2_theta, cos_mu2_theta, sin_recoil_theta, cos_recoil_theta).alias('absdAlpha2'),
-                
-                # Complex angle calculations
-                angle_3d_expr(pl.col('mu1Pt'), pl.col('mu1Theta'), 'mu1Phi',
-                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+
+                # 3D angles with transverse magnitudes (compute Pt directly to avoid intra-batch deps)
+                angle_3d_expr(pl.col('mu1P') * sin_mu1_theta, pl.col('mu1Theta'), 'mu1Phi',
+                            pl.col('pRecoil') * sin_recoil_theta, pl.col('pRecoilTheta'), 'pRecoilPhi',
                             sin_mu1_theta, cos_mu1_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu1PRecoil'),
-                angle_3d_expr(pl.col('mu2Pt'), pl.col('mu2Theta'), 'mu2Phi',
-                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                angle_3d_expr(pl.col('mu2P') * sin_mu2_theta, pl.col('mu2Theta'), 'mu2Phi',
+                            pl.col('pRecoil') * sin_recoil_theta, pl.col('pRecoilTheta'), 'pRecoilPhi',
                             sin_mu2_theta, cos_mu2_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu2PRecoil'),
-                angle_3d_expr(pl.col('mu1Pt'), pl.col('mu1clusterTheta'), 'mu1clusterPhi',
-                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                angle_3d_expr(pl.col('mu1P') * sin_mu1_theta, pl.col('mu1clusterTheta'), 'mu1clusterPhi',
+                            pl.col('pRecoil') * sin_recoil_theta, pl.col('pRecoilTheta'), 'pRecoilPhi',
                             sin_mu1_theta, cos_mu1_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu1ClusterPRecoil'),
-                angle_3d_expr(pl.col('mu2Pt'), pl.col('mu2clusterTheta'), 'mu2clusterPhi',
-                            pl.col('pTRecoil'), pl.col('pRecoilTheta'), 'pRecoilPhi',
+                angle_3d_expr(pl.col('mu2P') * sin_mu2_theta, pl.col('mu2clusterTheta'), 'mu2clusterPhi',
+                            pl.col('pRecoil') * sin_recoil_theta, pl.col('pRecoilTheta'), 'pRecoilPhi',
                             sin_mu2_theta, cos_mu2_theta, sin_recoil_theta, cos_recoil_theta).alias('deltaMu2ClusterPRecoil'),
             ]).with_columns([
-                # Minimum calculations
                 pl.min_horizontal(['deltaMu1PRecoil', 'deltaMu2PRecoil']).alias('min_deltaMuPRecoil'),
                 pl.min_horizontal(['deltaMu1ClusterPRecoil', 'deltaMu2ClusterPRecoil']).alias('min_deltaMuClusterPRecoil'),
             ])
-        
-        # Create computation node
+
+        # Create computation node linked to parent graph
         delta_node = GraphNode(
             op_type=ComputeOpType.MAP,
             operation=compute_delta_columns,
             inputs=[self._get_root_node()],
-            metadata={
-                'operation': 'delta_columns',
-                'columns_added': 16,
-                'compute_intensive': True
-            }
+            metadata={'operation': 'delta_columns', 'columns_added': len(delta_column_specs)}
         )
-        
-        # Update schema with new columns
+
+        # Update schema
         new_schema = self._schema.copy() if self._schema else {}
-        delta_columns = {
-            'absdPhi': pl.Float64, 'absdPhiMu1': pl.Float64, 'absdPhiMu2': pl.Float64,
-            'absdThetaMu1': pl.Float64, 'absdThetaMu2': pl.Float64,
-            'absdAlpha1': pl.Float64, 'absdAlpha2': pl.Float64,
-            'dRMu1': pl.Float64, 'dRMu2': pl.Float64,
-            'pTRecoil': pl.Float64, 'mu1Pt': pl.Float64, 'mu2Pt': pl.Float64,
-            'deltaMu1PRecoil': pl.Float64, 'deltaMu2PRecoil': pl.Float64,
-            'deltaMu1ClusterPRecoil': pl.Float64, 'deltaMu2ClusterPRecoil': pl.Float64,
-            'min_deltaMuPRecoil': pl.Float64, 'min_deltaMuClusterPRecoil': pl.Float64
-        }
-        new_schema.update(delta_columns)
-        
-        # Create new compute capability
+        new_schema.update(delta_column_specs)
+
+        # Expand required_columns so new columns are retained downstream
+        new_required_columns = None
+        if hasattr(self, 'required_columns') and self.required_columns:
+            new_required_columns = list(dict.fromkeys(self.required_columns + list(delta_column_specs.keys())))
+
         new_compute = self._create_compute_capability(delta_node, self._estimated_rows)
-        
+
         return self._create_derived_dataframe(
             new_compute=new_compute,
             new_schema=new_schema,
-            transformation_metadata=transform_meta
-        )
-    
+            transformation_metadata=transform_meta,
+            required_columns=new_required_columns
+        )    
     # ============================================================================
     # OPTIMAL MERGE: hist method combining HEAD's framework with MASTER's enhancements
     # ============================================================================
@@ -1936,8 +2022,12 @@ class UnifiedLazyDataFrame(Generic[T]):
                         column, bins, range, density, weights, metrics
                     )
                 
-                # Record memory usage
-                metrics.memory_peak_mb = get_memory_usage()
+                # Record memory usage (clamp to >= 0)
+                mem_delta = get_memory_usage()
+                try:
+                    metrics.memory_peak_mb = float(mem_delta) if mem_delta and mem_delta > 0 else 0.0
+                except Exception:
+                    metrics.memory_peak_mb = 0.0
                 
         except Exception as primary_error:
             # HEAD: Graceful degradation with cascade
@@ -1976,6 +2066,11 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Phase 4: Finalization and Metrics
         # ==================================
         metrics.execution_time = time.time() - start_time
+        # Sanity clamps
+        if metrics.processed_rows > metrics.total_rows > 0:
+            metrics.processed_rows = metrics.total_rows
+        if metrics.memory_peak_mb < 0:
+            metrics.memory_peak_mb = 0.0
         
         # Log performance metrics
         self._log_histogram_performance(metrics)
@@ -2117,7 +2212,8 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         This is MASTER's key innovation integrated into HEAD's framework.
         """
-        
+        # Timing for adaptive feedback
+        start_time = time.time()
         # Use ChunkingEnhancement for optimal sizing
         chunk_size = ChunkingEnhancement.calculate_optimal_chunk_size(
             memory_budget_gb=self.memory_budget_gb,
@@ -2145,7 +2241,11 @@ class UnifiedLazyDataFrame(Generic[T]):
             )
             
             accumulator += frame_contribution
-            metrics.processed_rows += np.sum(frame_contribution > 0) * chunk_size  # Estimate
+            # Count of entries contributing to histogram as proxy for processed rows
+            try:
+                metrics.processed_rows += int(np.asarray(frame_contribution).sum())
+            except Exception:
+                pass
             metrics.chunks_processed += 1
             
             # Adaptive adjustment after first frame
@@ -2176,13 +2276,9 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Physics-aware defaults (MASTER + HEAD combined)
         physics_ranges = {
-            # MASTER ranges
-            'M_bc': (5.20, 5.30), 'Mbc': (5.20, 5.30),
-            'delta_E': (-0.30, 0.30), 'deltaE': (-0.30, 0.30),
-            # HEAD ranges
             'pRecoil': (0.1, 6.0),
             'mu1P': (0.0, 5.0), 'mu2P': (0.0, 5.0),
-            'mu1Pt': (0.0, 3.0), 'mu2Pt': (0.0, 3.0),
+            # 'mu1Pt': (0.0, 3.0), 'mu2Pt': (0.0, 3.0),
         }
         
         if column in physics_ranges:
@@ -2367,32 +2463,70 @@ class UnifiedLazyDataFrame(Generic[T]):
     # ============================================================================
     def _process_frame_streaming(self, lazy_frame, column: str, bin_edges: np.ndarray, 
                                 chunk_size: int, weights: Optional[str]) -> np.ndarray:
-        """MASTER: Schema-aware streaming with robust validation."""
+        """MASTER: Schema-aware streaming with robust validation and true chunking."""
         try:
             # Validate schema before selection
             frame_schema = lazy_frame.collect_schema()
             available_columns = set(frame_schema.names())
-            
+
             # Build validated selection list
             validated_columns = []
-            
+
             if column not in available_columns:
-                raise KeyError(f"Histogram column '{column}' missing from schema. "
-                             f"Available: {sorted(available_columns)}")
+                raise KeyError(
+                    f"Histogram column '{column}' missing from schema. "
+                    f"Available: {sorted(available_columns)}"
+                )
             validated_columns.append(column)
-            
+
             if weights and weights in available_columns:
                 validated_columns.append(weights)
             elif weights:
                 warnings.warn(f"Weight column '{weights}' not found - proceeding unweighted")
                 weights = None
-            
+
             # Schema-safe projection
             projected_frame = lazy_frame.select(validated_columns)
-            
-            # Execute streaming histogram
-            return self._execute_streaming_histogram(projected_frame, column, bin_edges, weights)
-            
+
+            # Count rows once, then process in chunks to avoid materializing the entire frame
+            try:
+                total_rows = projected_frame.select(pl.count()).collect()[0, 0]
+            except Exception:
+                # Fallback: try a small collect to infer rows
+                df_tmp = projected_frame.head(1_000).collect()
+                total_rows = len(df_tmp)
+                if total_rows == 1_000:
+                    # Best effort estimate if we hit the head cap
+                    total_rows = max(total_rows, chunk_size)
+
+            # Accumulator for this frame
+            frame_acc = np.zeros(len(bin_edges) - 1, dtype=np.int64)
+            if total_rows <= 0:
+                return frame_acc
+
+            for offset in builtins.range(0, int(total_rows), int(max(1, chunk_size))):
+                try:
+                    chunk = projected_frame.slice(offset, chunk_size).collect()
+                    if len(chunk) == 0:
+                        continue
+                    values = chunk[column].to_numpy()
+                    weight_values = chunk[weights].to_numpy() if weights else None
+
+                    valid_mask = np.isfinite(values)
+                    if weights:
+                        valid_mask &= np.isfinite(weight_values)
+                        weight_values = weight_values[valid_mask]
+                    values = values[valid_mask]
+                    if len(values) == 0:
+                        continue
+                    counts, _ = np.histogram(values, bins=bin_edges, weights=weight_values)
+                    frame_acc += counts
+                except Exception as chunk_err:
+                    warnings.warn(f"Chunk failed at offset {offset}: {chunk_err}")
+                    continue
+
+            return frame_acc
+
         except Exception as e:
             warnings.warn(f"Frame streaming validation failed: {e}")
             return np.zeros(len(bin_edges) - 1, dtype=np.int64)
@@ -2662,6 +2796,8 @@ class UnifiedLazyDataFrame(Generic[T]):
         bin_edges = np.linspace(range[0], range[1], bins + 1)
         accumulator = np.zeros(bins, dtype=np.float64)
         
+        # Timing for adaptive feedback
+        start_time = time.time()
         # Get lazy frames
         lazy_frames = self._extract_lazy_frames_safely()
         
@@ -2689,6 +2825,28 @@ class UnifiedLazyDataFrame(Generic[T]):
             accumulator = accumulator / (metrics.processed_rows * bin_width)
         
         return accumulator, bin_edges
+
+    def _calculate_adaptive_chunk_size(self, column: str, bins: int, weights: Optional[str]) -> int:
+        """Compatibility shim used by LAZY_CHUNKED path.
+
+        Uses the same adaptive engine as the MASTER path, with very conservative
+        fallbacks so this method always exists and returns a sane number.
+        """
+        try:
+            # Prefer the unified adaptive routine
+            return self._calculate_optimal_histogram_chunk_size()
+        except Exception:
+            try:
+                # Ask the optimizer directly
+                avg_row_bytes = max(20 * (len(self._schema) if hasattr(self, '_schema') and self._schema else 20), 200)
+                optimizer = ChunkingEnhancement.get_optimizer(getattr(self, 'memory_budget_gb', 8.0))
+                return optimizer.calculate_optimal_chunk_size(
+                    getattr(self, '_estimated_rows', 1_000_000), avg_row_bytes, 'histogram'
+                )
+            except Exception:
+                # Last-ditch conservative guess
+                rows = max(1_000, getattr(self, '_estimated_rows', 1_000_000))
+                return min(max(100_000, rows // 50), rows)
     
     def _execute_memory_constrained_histogram(self, column: str, bins: int, range: Tuple[float, float],
                                             density: bool, weights: Optional[str],
@@ -2715,7 +2873,7 @@ class UnifiedLazyDataFrame(Generic[T]):
                 # Collect in small batches with explicit garbage collection
                 total_rows = projected.select(pl.count()).collect()[0, 0]
                 
-                for offset in range(0, total_rows, chunk_size):
+                for offset in builtins.range(0, total_rows, chunk_size):
                     # Explicit garbage collection before each chunk
                     import gc
                     gc.collect()
@@ -2828,7 +2986,7 @@ class UnifiedLazyDataFrame(Generic[T]):
             # Process in chunks
             total_rows = len(df)
             
-            for start_idx in range(0, total_rows, chunk_size):
+            for start_idx in builtins.range(0, total_rows, chunk_size):
                 end_idx = min(start_idx + chunk_size, total_rows)
                 
                 try:

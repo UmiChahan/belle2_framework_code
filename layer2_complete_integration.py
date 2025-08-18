@@ -138,6 +138,112 @@ class Belle2Layer2Framework:
                 warnings.warn("C++ acceleration not available")
         else:
             self._cpp_histogram = None
+    def _init_variable_labels(self) -> Dict[str, str]:
+        """
+        Initialize canonical Belle II variable labels with proper physics notation.
+        
+        This method provides the canonical variable labels used throughout the framework
+        for consistent presentation in plots and analysis outputs. It consolidates
+        variable label definitions from belle2_style_manager.UnifiedBelle2PlotStyle.
+        
+        Returns:
+            Dict mapping variable names to LaTeX-formatted labels with units
+        
+        Design Principles:
+        - Single source of truth for variable labels
+        - Physics-standard notation following Belle II conventions
+        - Extensible through _custom_labels overlay mechanism
+        - Memory-efficient with lazy initialization
+        """
+        return {
+            # ===== KINEMATIC VARIABLES =====
+            # Recoil system
+            'pRecoil': r'$p_{\mathrm{recoil}}$ [GeV/$c$]',
+            'eRecoil': r'$E_{\mathrm{recoil}}$ [GeV]',
+            'mRecoil': r'$m_{\mathrm{recoil}}$ [GeV/$c^2$]',
+            'm2Recoil': r'$m^2_{\mathrm{recoil}}$ [(GeV/$c^2$)$^2$]',
+            'pRecoilTheta': r'$\theta_{p_{\mathrm{recoil}}}$ [rad]',
+            'pRecoilPhi': r'$\phi_{p_{\mathrm{recoil}}}$ [rad]',
+            'EoPRecoil': r'$E/p_{\mathrm{recoil}}$',
+            'delta_E': r'$\Delta E$ [GeV]',
+            
+            # ===== MUON VARIABLES =====
+            # Muon kinematics
+            'mu1P': r'$p_{\mu_1}$ [GeV/$c$]',
+            'mu2P': r'$p_{\mu_2}$ [GeV/$c$]',
+            'mu1E': r'$E_{\mu_1}$ [GeV]',
+            'mu2E': r'$E_{\mu_2}$ [GeV]',
+            'mu1Theta': r'$\theta_{\mu_1}$ [rad]',
+            'mu2Theta': r'$\theta_{\mu_2}$ [rad]',
+            'mu1Phi': r'$\phi_{\mu_1}$ [rad]',
+            'mu2Phi': r'$\phi_{\mu_2}$ [rad]',
+            'totalMuonMomentum': r'$p_{\mu\mu}$ [GeV/$c$]',
+            
+            # Muon calorimeter
+            'mu1clusterE': r'$E_{\mathrm{cluster},\mu_1}$ [GeV]',
+            'mu2clusterE': r'$E_{\mathrm{cluster},\mu_2}$ [GeV]',
+            'mu1clusterEoP': r'$E/p_{\mu_1}$',
+            'mu2clusterEoP': r'$E/p_{\mu_2}$',
+            'mu1clusterTheta': r'$\theta_{\mathrm{cluster},\mu_1}$ [rad]',
+            'mu2clusterTheta': r'$\theta_{\mathrm{cluster},\mu_2}$ [rad]',
+            'mu1clusterPhi': r'$\phi_{\mathrm{cluster},\mu_1}$ [rad]',
+            'mu2clusterPhi': r'$\phi_{\mathrm{cluster},\mu_2}$ [rad]',
+            
+            # Muon tracking
+            'mu1nCDCHits': r'$N_{\mathrm{CDC hits},\mu_1}$',
+            'mu2nCDCHits': r'$N_{\mathrm{CDC hits},\mu_2}$',
+            
+            # ===== PHOTON VARIABLES =====
+            'theta': r'$\theta_{\gamma}$ [rad]',
+            'phi': r'$\phi_{\gamma}$ [rad]',
+            'E': r'$E_{\gamma}$ [GeV]',
+            'beamE': r'$E_{\mathrm{beam}}$ [GeV]',
+            'nPhotonCands': r'$N_{\gamma}^{\mathrm{cands}}$',
+            'nGammaROE': r'$N_{\gamma}^{\mathrm{ROE}}$',
+            
+            # Virtual photon
+            'vpho_px': r'$p_x^{\gamma^*}$ [GeV/$c$]',
+            'vpho_py': r'$p_y^{\gamma^*}$ [GeV/$c$]',
+            'vpho_pz': r'$p_z^{\gamma^*}$ [GeV/$c$]',
+            'vpho_E': r'$E^{\gamma^*}$ [GeV]',
+            
+            # ===== EVENT TOPOLOGY =====
+            'nTracksROE': r'$N_{\mathrm{tracks}}^{\mathrm{ROE}}$',
+            'nTracks': r'$N_{\mathrm{tracks}}$',
+            'sumE_offcone': r'$\sum E_{\mathrm{off-cone}}$ [GeV]',
+            'sumE_offcone_barrel': r'$\sum E_{\mathrm{off-cone}}^{\mathrm{barrel}}$ [GeV]',
+            
+            # ===== ANGULAR VARIABLES =====
+            'cosTheta': r'$\cos(\theta)$',
+            'angular_separation': r'$\theta_{\gamma,\mathrm{recoil}}$ [rad]',
+            
+            # ===== TIMING VARIABLES =====
+            'clusterTiming': r'$t_{\mathrm{cluster}}$ [ns]',
+            'clusterErrorTiming': r'$\sigma_{t_{\mathrm{cluster}}}$ [ns]',
+            'minC2TDist': r'Min cluster-to-track distance [cm]',
+            
+            # ===== MC TRUTH VARIABLES =====
+            'mcMatchWeight': r'MC match weight',
+            'mcPDG': r'MC PDG code',
+            '__weight__': r'Event weight',
+            '__eventType__': r'Event type',
+            
+            # ===== METADATA =====
+            '__experiment__': r'Experiment number',
+            '__run__': r'Run number',
+            '__event__': r'Event number',
+            '__production__': r'Production ID',
+            '__candidate__': r'Candidate index',
+            '__ncandidates__': r'Number of candidates',
+            
+            # ===== SELECTION VARIABLES =====
+            'psnm_ffo': r'PS(n,m) FFO',
+            
+            # ===== BOOSTED FRAME VARIABLES =====
+            'useCMSFrame__bophi__bc': r'$\phi_{\mathrm{boost}}$ (CMS) [rad]',
+            'useCMSFrame__botheta__bc': r'$\theta_{\mathrm{boost}}$ (CMS) [rad]',
+            'useCMSFrame__boE__bc': r'$E_{\mathrm{boost}}$ (CMS) [GeV]',
+        }
     
     # ========================================================================
     # Data Loading Methods
