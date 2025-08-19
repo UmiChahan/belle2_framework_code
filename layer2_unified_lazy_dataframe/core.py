@@ -14,601 +14,55 @@ Design Philosophy:
 
 Integration: Seamlessly builds on Layer 1 compute engines
 """
-import copy
-import os
+from __future__ import annotations
 import sys
+import copy
 import warnings
 import weakref
-import hashlib
 import time
-import traceback
-from contextlib import contextmanager
 import ast
 import builtins
-from abc import abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime
-from enum import Enum, auto
-from functools import lru_cache, cached_property, wraps
+from dataclasses import field
 from pathlib import Path
 from typing import (
-    Any, Dict, List, Optional, Union, Iterator, Callable, 
-    TypeVar, Generic, Protocol, runtime_checkable, Tuple, Set,List,
-    TYPE_CHECKING
+    Any, Dict, List, Optional, Union, 
+    TypeVar, Generic,Tuple,List,
 )
 import numpy as np
 import polars as pl
 import pyarrow as pa
-from uuid import uuid4
 import psutil
+import pandas as pd
 
-# Add parent directory to path for imports
+# Make repository root importable
 parent_dir = Path(__file__).parent.parent
 if str(parent_dir) not in sys.path:
     sys.path.insert(0, str(parent_dir))
 
-# Import Layer 0 protocols
-from layer0 import (
-    ComputeCapability, ComputeOpType
-)
+# Layer 0/1 integration points
 
-# Import Layer 1 engines
-from layer1.lazy_compute_engine import (
-    LazyComputeCapability, GraphNode
-)
+from layer0 import ComputeCapability, ComputeOpType  # type: ignore
 
-from layer1.integration_layer import (
-    EngineSelector, ComputeEngineAdapter
-)
+from layer1.lazy_compute_engine import LazyComputeCapability, GraphNode  # type: ignore
 
-# Import C++ acceleration
+from layer1.integration_layer import EngineSelector, ComputeEngineAdapter  # type: ignore
 try:
-    from optimized_cpp_integration import (
-        OptimizedStreamingHistogram,
-        configure_openmp_for_hpc  # MASTER addition for HPC
-    )
+    from optimized_cpp_integration import OptimizedStreamingHistogram  # type: ignore
     CPP_HISTOGRAM_AVAILABLE = True
-except ImportError:
-    warnings.warn("C++ histogram acceleration not available")
-    CPP_HISTOGRAM_AVAILABLE = False
+except Exception:  # pragma: no cover - keep import-safe without native ext
     OptimizedStreamingHistogram = None
-try:
-    from Combined_framework import (
-        BillionCapableFramework,
-        BillionCapableBlazingCore,
-        SmartEvaluator
-    )
-    FRAMEWORK_AVAILABLE = True
-except ImportError:
-    FRAMEWORK_AVAILABLE = False
-
-if TYPE_CHECKING:
-    import pandas as pd
-
-T = TypeVar('T')
-
-# ============================================================================
-# EXECUTION STRATEGY ENUMERATION
-# ============================================================================
-
-class HistogramExecutionStrategy(Enum):
-    """Execution strategies for histogram computation."""
-    CPP_ACCELERATED = auto()      # C++ streaming histogram
-    BILLION_ROW_ENGINE = auto()   # Layer 1 billion row engine with spilling
-    ADAPTIVE_CHUNKED = auto()     # Adaptive chunked execution (advanced)
-    LAZY_CHUNKED = auto()         # Standard Polars lazy with smart chunking
-    MEMORY_CONSTRAINED = auto()   # Ultra-conservative for OOM prevention
-    FALLBACK_BASIC = auto()       # Last resort basic implementation
-# ============================================================================
-# PERFORMANCE METRICS
-# ============================================================================
-
-@dataclass
-class HistogramMetrics:
-    """Comprehensive metrics for histogram execution."""
-    strategy: HistogramExecutionStrategy
-    total_rows: int
-    processed_rows: int
-    execution_time: float
-    memory_peak_mb: float
-    chunk_size_used: int
-    chunks_processed: int
-    errors_recovered: int
-    
-    @property
-    def throughput_mps(self) -> float:
-        """Million rows per second throughput."""
-        if self.execution_time > 0:
-            return (self.processed_rows / 1e6) / self.execution_time
-        return 0.0
-    
-    @property
-    def efficiency(self) -> float:
-        """Processing efficiency (processed/total)."""
-        if self.total_rows > 0:
-            return self.processed_rows / self.total_rows
-        return 0.0
-
-# ============================================================================
-# MEMORY MONITORING CONTEXT
-# ============================================================================
-
-@contextmanager
-def memory_monitor(threshold_mb: float = None):
-    """Context manager for memory monitoring with optional threshold alerts."""
-    process = psutil.Process()
-    initial_memory = process.memory_info().rss / 1024 / 1024  # MB
-    peak_memory = initial_memory
-    
-    try:
-        yield lambda: (process.memory_info().rss / 1024 / 1024) - initial_memory
-    finally:
-        final_memory = process.memory_info().rss / 1024 / 1024
-        peak_memory = max(peak_memory, final_memory)
-        memory_delta = final_memory - initial_memory
-        
-        if threshold_mb and memory_delta > threshold_mb:
-            warnings.warn(f"Memory usage exceeded threshold: {memory_delta:.1f}MB > {threshold_mb}MB")
-
-# ============================================================================
-# Supporting Classes and Utilities
-# ============================================================================
-
-@dataclass
-class AccessPattern:
-    """Tracks access patterns for optimization."""
-    column: Optional[str]
-    operation: str
-    timestamp: float
-    selectivity: Optional[float] = None
-    memory_usage: Optional[int] = None
-
-
-@dataclass
-class MaterializationStrategy:
-    """Controls how compute graphs materialize to concrete data."""
-    format: str = 'auto'  # 'auto', 'arrow', 'polars', 'numpy', 'pandas'
-    batch_size: Optional[int] = None
-    memory_limit: Optional[int] = None
-    spill_enabled: bool = True
-    compression: Optional[str] = None
-
-
-@dataclass
-class TransformationMetadata:
-    """Immutable record of a data transformation with full provenance tracking."""
-    operation: str
-    timestamp: datetime = field(default_factory=datetime.now)
-    parameters: Dict[str, Any] = field(default_factory=dict)
-    source_groups: Dict[str, List[str]] = field(default_factory=dict)
-    result_processes: List[str] = field(default_factory=list)
-    parent_id: Optional[str] = None
-    
-    def __post_init__(self):
-        """Generate unique transformation ID."""
-        self.id = f"{self.operation}_{self.timestamp.isoformat()}_{id(self)}"
-
-
-class DataTransformationChain:
-    """Manages transformation history with validation and rollback capabilities."""
-    
-    def __init__(self):
-        self._transformations: List[TransformationMetadata] = []
-        self._checkpoints: Dict[str, int] = {}
-    
-    def add_transformation(self, metadata: TransformationMetadata) -> None:
-        """Add transformation with validation."""
-        if self._transformations:
-            metadata.parent_id = self._transformations[-1].id
-        self._transformations.append(metadata)
-    
-    def create_checkpoint(self, name: str) -> None:
-        """Create named checkpoint for potential rollback."""
-        self._checkpoints[name] = len(self._transformations)
-    
-    def get_lineage(self) -> List[TransformationMetadata]:
-        """Get complete transformation lineage."""
-        return self._transformations.copy()
-    
-    def validate_chain(self) -> Tuple[bool, List[str]]:
-        """Validate entire transformation chain for consistency."""
-        issues = []
-        
-        for i, transform in enumerate(self._transformations):
-            # Check parent linkage
-            if i > 0 and transform.parent_id != self._transformations[i-1].id:
-                issues.append(f"Broken chain at transformation {i}: {transform.operation}")
-            
-            # Validate parameter types
-            if 'query' in transform.operation and 'expr' not in transform.parameters:
-                issues.append(f"Query operation missing expression at {i}")
-        
-        return len(issues) == 0, issues
-
-class AdaptiveChunkOptimizer:
-    """
-    Research-grade adaptive chunking with system awareness.
-    
-    ALGORITHMIC FOUNDATION:
-    ├── Cache-Conscious Sizing: Optimize for L3 cache utilization
-    ├── Bandwidth Optimization: Match memory subsystem capabilities  
-    ├── Storage-Aware Patterns: Align with storage characteristics
-    ├── Scale-Adaptive Logic: Dataset-proportional optimization
-    └── Performance Learning: Continuous improvement via feedback
-    
-    COMPLEXITY: O(1) amortized after system profiling
-    MEMORY: O(1) constant overhead regardless of dataset size
-    """
-    
-    def __init__(self, memory_budget_gb: float):
-        self.memory_budget_gb = memory_budget_gb
-        self.system = SystemCharacteristics.detect()
-        self.performance_history = PerformanceHistory()
-        self._cache_utilization_target = 0.75
-        self._bandwidth_utilization_target = 0.80
-
-    def calculate_optimal_chunk_size(self, estimated_rows: int,
-                                     avg_row_bytes: float,
-                                     operation_type: str = 'histogram') -> int:
-        """Robust, bounded chunk-size selection.
-
-        Goals:
-        - Respect memory budget (<=25% per chunk)
-        - Scale with dataset size (10–75 chunks depending on scale)
-        - Keep results within [1_000, 20_000_000] and <= estimated_rows
-        """
-        try:
-            # Memory-based bound
-            per_chunk_bytes = max(avg_row_bytes, 1.0)
-            budget_bytes = float(self.memory_budget_gb) * (1024 ** 3) * 0.25
-            mem_based = max(10_000, int(budget_bytes / per_chunk_bytes))
-
-            # Scale-based bound
-            if estimated_rows <= 0:
-                return 100_000
-            if estimated_rows < 1_000_000:
-                target_chunks = 10
-            elif estimated_rows < 10_000_000:
-                target_chunks = 15
-            elif estimated_rows < 100_000_000:
-                target_chunks = 30
-            else:
-                # parallelism-aware upper bound
-                target_chunks = min(75, (self.system.cpu_cores or 4) * 4)
-            scale_based = max(100_000, estimated_rows // target_chunks)
-
-            # Conservative baseline bound
-            baseline = max(50_000, min(5_000_000, estimated_rows // 20))
-
-            # Aggregate via median to avoid extremes
-            base = int(np.median([mem_based, scale_based, baseline]))
-
-            # Final guards
-            base = max(1_000, min(base, 20_000_000))
-            base = min(base, estimated_rows)
-            return base
-        except Exception:
-            # Absolute fallback
-            return max(100_000, estimated_rows // 50 if estimated_rows > 0 else 100_000)
-
-# ---------------------------------------------------------------------------
-# Lightweight system profiling and performance history fallbacks
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SystemCharacteristics:
-    cpu_cores: int
-    memory_gb: float
-    cache_mb: int
-    storage_type: str
-
-    @staticmethod
-    def detect() -> 'SystemCharacteristics':
-        try:
-            cores = psutil.cpu_count(logical=True) or 4
-            mem_gb = (psutil.virtual_memory().total or 8 * 1024**3) / 1024**3
-        except Exception:
-            cores, mem_gb = 4, 8.0
-        # Cache size is not directly available; use a heuristic
-        cache_mb = 8 * 1024 if mem_gb >= 64 else 4 * 1024 if mem_gb >= 32 else 2048
-        # Storage heuristic: NVMe likely on fast systems, else SSD
-        storage = 'nvme' if mem_gb >= 64 else 'ssd'
-        return SystemCharacteristics(cpu_cores=cores, memory_gb=mem_gb, cache_mb=cache_mb, storage_type=storage)
-
-
-class PerformanceHistory:
-    def __init__(self):
-        self._history: Dict[int, float] = {}
-
-    def record(self, chunk_size: int, throughput: float):
-        # Keep max throughput per chunk size
-        prev = self._history.get(chunk_size, 0.0)
-        if throughput > prev:
-            self._history[chunk_size] = throughput
-
-    def get_optimal_chunk_size(self, default_size: int) -> int:
-        if not self._history:
-            return default_size
-        # Return chunk size with best throughput
-        return max(self._history.items(), key=lambda kv: kv[1])[0]
-        
-    def _calculate_optimal_histogram_chunk_size(self) -> int:
-        """PRIVATE: Internal calculation implementation."""
-        # Use instance attributes set by public interface
-        if hasattr(self, '_estimated_rows') and self._estimated_rows > 0:
-            # Existing calculation logic...
-            cache_optimal = self._calculate_cache_optimal_size(self._avg_row_bytes)
-            bandwidth_optimal = self._calculate_bandwidth_optimal_size(
-                self._avg_row_bytes, self._operation_type
-            )
-            storage_optimal = self._calculate_storage_optimal_size(self._avg_row_bytes)
-            scale_adaptive = self._calculate_scale_adaptive_bounds(self._estimated_rows)
-            
-            # Synthesize recommendations
-            candidates = [cache_optimal, bandwidth_optimal, storage_optimal, scale_adaptive]
-            base_size = int(np.median(candidates))
-            
-            # Apply constraints and history
-            base_size = self._apply_system_constraints(
-                base_size, self._estimated_rows, self._avg_row_bytes
-            )
-            final_size = self._integrate_performance_feedback(base_size)
-            
-            return final_size
-        
-        # Fallback
-        return min(1_000_000, self._estimated_rows) if self._estimated_rows > 0 else 10_000
-    
-    def calculate_optimal_chunk_size(self, estimated_rows: int, 
-                                   avg_row_bytes: float, 
-                                   operation_type: str) -> int:
-        """PUBLIC: Primary interface - MUST be a class method, not nested!"""
-        # Store parameters as instance attributes
-        self._estimated_rows = estimated_rows
-        self._avg_row_bytes = avg_row_bytes
-        self._operation_type = operation_type
-        
-        # Delegate to internal implementation
-        return self._calculate_optimal_histogram_chunk_size()
-    
-    def _calculate_cache_optimal_size(self, avg_row_bytes: float) -> int:
-        """
-        Optimize for L3 cache efficiency.
-        
-        THEORY: Cache-conscious algorithms (Frigo et al.)
-        TARGET: Keep working set within L3 cache for optimal memory access
-        """
-        l3_cache_bytes = self.system.cache_mb * 1024 * 1024
-        usable_cache = l3_cache_bytes * self._cache_utilization_target
-        
-        # Account for operation overhead (histogram requires ~2x memory)
-        working_memory_factor = 2.0
-        effective_cache = usable_cache / working_memory_factor
-        
-        cache_optimal_rows = int(effective_cache / avg_row_bytes)
-        return max(cache_optimal_rows, 10_000)  # Minimum viable chunk
-    
-    def _calculate_bandwidth_optimal_size(self, avg_row_bytes: float, operation_type: str) -> int:
-        """
-        Optimize for memory bandwidth utilization.
-        
-        THEORY: Roofline performance model (Williams et al.)
-        TARGET: Sustain target percentage of peak memory bandwidth
-        """
-        # Memory bandwidth estimation (architecture-dependent)
-        if self.system.memory_gb < 16:
-            bandwidth_gbps = 25.6   # DDR4-3200 single channel
-        elif self.system.memory_gb < 64:
-            bandwidth_gbps = 51.2   # DDR4-3200 dual channel  
-        else:
-            bandwidth_gbps = 102.4  # High-end system
-        
-        target_bandwidth = bandwidth_gbps * self._bandwidth_utilization_target
-        
-        # Operation complexity factors
-        operation_factors = {
-            'histogram': 1.5,  # CPU + memory intensive
-            'filter': 1.0,     # Memory streaming
-            'groupby': 2.0,    # Complex memory patterns
-            'aggregation': 1.2 # Moderate complexity
-        }
-        
-        complexity_factor = operation_factors.get(operation_type, 1.0)
-        effective_bandwidth = target_bandwidth / complexity_factor
-        
-        # Chunk duration target: 50ms for responsiveness
-        chunk_duration = 0.05  # seconds
-        target_bytes_per_chunk = effective_bandwidth * 1e9 * chunk_duration
-        
-        bandwidth_optimal_rows = int(target_bytes_per_chunk / avg_row_bytes)
-        return max(bandwidth_optimal_rows, 50_000)
-    
-    def _calculate_storage_optimal_size(self, avg_row_bytes: float) -> int:
-        """
-        Optimize for storage I/O patterns.
-        
-        THEORY: Storage hierarchy optimization
-        TARGET: Align chunk sizes with optimal I/O transfer sizes
-        """
-        # Storage-specific optimal transfer sizes
-        optimal_transfer_mb = {
-            'nvme': 16,   # NVMe: Large sequential reads optimal
-            'ssd': 8,     # SSD: Moderate transfer sizes  
-            'hdd': 32     # HDD: Very large sequential reads critical
-        }
-        
-        transfer_mb = optimal_transfer_mb.get(self.system.storage_type, 8)
-        target_bytes = transfer_mb * 1024 * 1024
-        
-        storage_optimal_rows = int(target_bytes / avg_row_bytes)
-        return max(storage_optimal_rows, 25_000)
-    
-    def _calculate_scale_adaptive_bounds(self, estimated_rows: int) -> int:
-        """
-        Dataset-proportional optimization bounds.
-        
-        THEORY: Adaptive algorithms with scale awareness
-        TARGET: Chunk count proportional to dataset complexity
-        """
-        if estimated_rows < 1_000_000:
-            # Small datasets: 5-10 chunks for low overhead
-            target_chunks = 10
-        elif estimated_rows < 10_000_000:
-            # Medium datasets: 10-20 chunks for balance
-            target_chunks = 15
-        elif estimated_rows < 100_000_000:
-            # Large datasets: 20-50 chunks for throughput
-            target_chunks = 30
-        else:
-            # Massive datasets: 50-100 chunks for optimal parallelism
-            target_chunks = min(75, self.system.cpu_cores * 4)
-        
-        scale_optimal_rows = estimated_rows // target_chunks
-        return max(scale_optimal_rows, 100_000)
-    
-    def _apply_system_constraints(self, base_size: int, estimated_rows: int, avg_row_bytes: float) -> int:
-        """Apply hard system constraints and safety bounds."""
-        
-        # Constraint 1: Memory budget enforcement
-        chunk_memory_gb = (base_size * avg_row_bytes) / (1024**3)
-        max_chunk_memory_gb = self.memory_budget_gb * 0.25  # 25% of budget per chunk
-        
-        if chunk_memory_gb > max_chunk_memory_gb:
-            memory_constrained_size = int((max_chunk_memory_gb * 1024**3) / avg_row_bytes)
-            base_size = min(base_size, memory_constrained_size)
-        
-        # Constraint 2: Dataset bounds
-        base_size = min(base_size, estimated_rows)
-        
-        # Constraint 3: Minimum/maximum bounds for stability
-        base_size = max(base_size, 1_000)  # Minimum viable
-        base_size = min(base_size, 20_000_000)  # Maximum for responsiveness
-        
-        return base_size
-    
-    def _integrate_performance_feedback(self, base_size: int) -> int:
-        """Integrate performance history for continuous optimization."""
-        
-        # Get historically optimal size
-        history_optimal = self.performance_history.get_optimal_chunk_size(base_size)
-        
-        if history_optimal == base_size:
-            return base_size
-        
-        # Weighted blend: 70% system optimization, 30% historical performance
-        blended_size = int(0.7 * base_size + 0.3 * history_optimal)
-        
-        # Ensure reasonable bounds
-        return max(1_000_000, min(blended_size, 20_000_000))
-    
-    def record_performance(self, chunk_size: int, rows_processed: int, execution_time: float):
-        """Record performance for adaptive learning."""
-        
-        if execution_time > 0:
-            throughput = rows_processed / execution_time
-            self.performance_history.record(chunk_size, throughput)
-
-# ============================================================================
-# SEAMLESS INTEGRATION INTERFACE
-# ============================================================================
-
-class ChunkingEnhancement:
-    """
-    Seamless integration interface for existing frameworks.
-    
-    INTEGRATION PATTERN: Dependency Injection + Factory
-    BACKWARD COMPATIBILITY: 100% preserved
-    PERFORMANCE IMPACT: Zero overhead when disabled
-    """
-    
-    _optimizer_cache: Dict[float, AdaptiveChunkOptimizer] = {}
-    _enabled: bool = True
-    
-    @classmethod
-    def get_optimizer(cls, memory_budget_gb: float) -> AdaptiveChunkOptimizer:
-        """Get cached optimizer instance for memory budget."""
-        
-        if memory_budget_gb not in cls._optimizer_cache:
-            cls._optimizer_cache[memory_budget_gb] = AdaptiveChunkOptimizer(memory_budget_gb)
-        
-        return cls._optimizer_cache[memory_budget_gb]
-    
-    @classmethod
-    def enable_optimization(cls, enabled: bool = True):
-        """Enable/disable optimization globally."""
-        cls._enabled = enabled
-        print(f"🔧 Adaptive chunking optimization: {'enabled' if enabled else 'disabled'}")
-    
-    @classmethod
-    def calculate_optimal_chunk_size(cls,
-                                memory_budget_gb: float,
-                                estimated_rows: int,
-                                avg_row_bytes: float = 100.0,
-                                operation_type: str = 'histogram',
-                                fallback_calculation: Optional[callable] = None) -> int:
-        """Robust integration with recursion protection."""
-        
-        # CRITICAL: Thread-safe recursion guard
-        import threading
-        thread_id = threading.get_ident()
-        guard_attr = f'_in_calculation_{thread_id}'
-        
-        if hasattr(cls, guard_attr):
-            print("⚠️ Recursion detected in chunk calculation, using fallback")
-            return cls._conservative_fallback(memory_budget_gb, estimated_rows)
-        
-        setattr(cls, guard_attr, True)
-        try:
-            if not cls._enabled or estimated_rows <= 0:
-                return fallback_calculation() if fallback_calculation else \
-                    cls._conservative_fallback(memory_budget_gb, estimated_rows)
-            
-            # Get optimizer with proper initialization
-            optimizer = cls.get_optimizer(memory_budget_gb)
-            
-            # Validate optimizer structure
-            if not hasattr(optimizer, 'calculate_optimal_chunk_size'):
-                raise AttributeError("Optimizer missing required method")
-            
-            # Execute calculation with validation
-            chunk_size = optimizer.calculate_optimal_chunk_size(
-                estimated_rows, avg_row_bytes, operation_type
-            )
-            
-            # Strict validation
-            if chunk_size <= 0:
-                chunk_size = max(100_000, estimated_rows // 100)
-            elif chunk_size > estimated_rows:
-                chunk_size = estimated_rows
-            
-            return chunk_size
-        
-        except Exception as e:
-            print(f"⚠️ Adaptive optimization failed: {e}, using fallback")
-            return cls._conservative_fallback(memory_budget_gb, estimated_rows)
-        finally:
-            delattr(cls, guard_attr)
-    
-    @classmethod
-    def _conservative_fallback(cls, memory_budget_gb: float, estimated_rows: int) -> int:
-        """Conservative fallback calculation."""
-        
-        # Simple memory-based calculation
-        bytes_per_row = 100  # Conservative estimate
-        available_memory = memory_budget_gb * 1024**3 * 0.2  # 20% utilization
-        memory_optimal = int(available_memory / bytes_per_row)
-        
-        # Scale with dataset size
-        if estimated_rows < 1_000_000:
-            return max(10_000, min(memory_optimal, estimated_rows // 10))
-        elif estimated_rows < 10_000_000:
-            return max(100_000, min(memory_optimal, estimated_rows // 50))
-        else:
-            return max(500_000, min(memory_optimal, estimated_rows // 100))
-# ============================================================================
-# Core UnifiedLazyDataFrame Implementation
-# ============================================================================
-
+    CPP_HISTOGRAM_AVAILABLE = False
+from .accessors import LazyColumnAccessor
+from .groupby import LazyGroupBy
+from .utils import (
+    TransformationMetadata, DataTransformationChain,
+    AccessPattern
+)
+from .histogram_strategies import (
+    HistogramExecutionStrategy, HistogramMetrics,memory_monitor,
+    ChunkingEnhancement
+)
+T = TypeVar("T")
 class UnifiedLazyDataFrame(Generic[T]):
     """
     A data structure that manifests compute capabilities as a familiar DataFrame API.
@@ -642,7 +96,7 @@ class UnifiedLazyDataFrame(Generic[T]):
              parent_chain=None,
              histogram_engine=None):  # NEW: Accept parent chain
         """Initialize DataFrame with correct transformation tracking."""
-        
+
         # Initialize ALL attributes first
         self.memory_budget_gb = memory_budget_gb
         self.materialization_threshold = materialization_threshold
@@ -656,10 +110,11 @@ class UnifiedLazyDataFrame(Generic[T]):
         self._framework = None
         self._histogram_engine = histogram_engine
         self._coordinated_engine = None
-        
+        self._schema_cache = None  # cache used by schema()
+
         # Initialize transformation chain
         self._transformation_chain = DataTransformationChain()
-        
+
         # CRITICAL: Copy parent chain if provided
         if parent_chain:
             for transform in parent_chain:
@@ -2157,9 +1612,9 @@ class UnifiedLazyDataFrame(Generic[T]):
             # Physics-aware reduction calculation
             for transform in chain:
                 op = getattr(transform, 'operation', '')
-                if op == 'dataframe_oneCandOnly':
+                if op in ('oneCandOnly', 'dataframe_oneCandOnly'):
                     fresh_rows = int(fresh_rows * 0.1)
-                elif op == 'query':
+                elif op in ('query', 'dataframe_query'):
                     selectivity = getattr(transform, 'parameters', {}).get('selectivity', 0.5)
                     fresh_rows = int(fresh_rows * selectivity)
                 elif op == 'aggregate':
@@ -2670,19 +2125,8 @@ class UnifiedLazyDataFrame(Generic[T]):
                 pass
         return None
     
-    def _extract_lazy_frames_from_compute(self):
-        """MASTER: Extract lazy frames from compute graph."""
-        # Implementation depends on compute structure
-        # This is a placeholder that should be implemented based on actual compute capability
-        if hasattr(self, '_lazy_frames') and self._lazy_frames:
-            return self._lazy_frames
-        
-        # Try to extract from compute
-        if hasattr(self._compute, 'to_lazy_frames'):
-            return self._compute.to_lazy_frames()
-        
-        # Fallback
-        raise ValueError("Cannot extract lazy frames from compute capability")
+    # NOTE: The cached extractor _extract_lazy_frames_from_compute is defined earlier.
+    # Avoid redefining it here to prevent overriding the cached implementation.
     
     # ============================================================================
     # Utility Methods (preserved from both)
@@ -2719,7 +2163,14 @@ class UnifiedLazyDataFrame(Generic[T]):
         if not lazy_frames:
             raise ValueError("No lazy frames available for C++ processing")
         
-        # Configure C++ engine optimally
+        # Ensure C++ engine exists
+        if not hasattr(self, '_histogram_engine') or self._histogram_engine is None:
+            engine = self._get_or_create_cpp_engine()
+            if engine is None:
+                raise ValueError("C++ engine unavailable")
+            self._histogram_engine = engine
+        
+        # Configure C++ engine optimally (if supported)
         if hasattr(self._histogram_engine, 'configure'):
             self._histogram_engine.configure(
                 num_threads=min(psutil.cpu_count(), len(lazy_frames)),
@@ -2732,7 +2183,14 @@ class UnifiedLazyDataFrame(Generic[T]):
         )
         
         # Update metrics
-        metrics.processed_rows = self._estimated_rows  # C++ processes everything
+        # Prefer measured processed rows when density is False; otherwise, fall back to estimate
+        try:
+            if not density and isinstance(counts, np.ndarray):
+                metrics.processed_rows = int(np.sum(counts))
+            else:
+                metrics.processed_rows = self._estimated_rows
+        except Exception:
+            metrics.processed_rows = self._estimated_rows
         metrics.chunks_processed = len(lazy_frames)
         
         return counts, edges
@@ -2963,61 +2421,53 @@ class UnifiedLazyDataFrame(Generic[T]):
     def _process_frame_chunked(self, lazy_frame: pl.LazyFrame, column: str,
                              bin_edges: np.ndarray, chunk_size: int,
                              weights: Optional[str]) -> Tuple[np.ndarray, int]:
-        """Process a single frame in chunks with error recovery."""
-        
+        """Process a single frame in chunks with error recovery (true lazy slicing)."""
         frame_accumulator = np.zeros(len(bin_edges) - 1, dtype=np.float64)
         total_processed = 0
-        
+
         try:
             # Project only needed columns for memory efficiency
             cols_needed = [column] if not weights else [column, weights]
             projected = lazy_frame.select(cols_needed)
-            
-            # Try streaming collection first
+
+            # Count once to avoid collecting whole frame
             try:
-                df = projected.collect(streaming=True)
-            except:
-                # Fallback to regular collection
-                df = projected.collect()
-            
-            if len(df) == 0:
+                total_rows = int(projected.select(pl.count()).collect()[0, 0])
+            except Exception:
+                total_rows = chunk_size
+
+            if total_rows <= 0:
                 return frame_accumulator, 0
-            
-            # Process in chunks
-            total_rows = len(df)
-            
-            for start_idx in builtins.range(0, total_rows, chunk_size):
-                end_idx = min(start_idx + chunk_size, total_rows)
-                
+
+            for start_idx in builtins.range(0, total_rows, max(1, int(chunk_size))):
                 try:
-                    # Extract chunk
-                    chunk = df.slice(start_idx, end_idx - start_idx)
-                    
-                    # Get values
+                    chunk = projected.slice(start_idx, min(chunk_size, total_rows - start_idx)).collect()
+                    if len(chunk) == 0:
+                        continue
                     values = chunk[column].to_numpy()
                     weight_values = chunk[weights].to_numpy() if weights else None
-                    
+
                     # Filter valid values
                     valid_mask = np.isfinite(values)
                     if weights:
                         valid_mask &= np.isfinite(weight_values)
                         weight_values = weight_values[valid_mask]
-                    
+
                     values = values[valid_mask]
-                    
+
                     # Compute histogram
                     if len(values) > 0:
                         chunk_counts, _ = np.histogram(values, bins=bin_edges, weights=weight_values)
                         frame_accumulator += chunk_counts
                         total_processed += len(values)
-                        
+
                 except Exception as chunk_error:
                     print(f"      ⚠️ Chunk processing error: {chunk_error}, skipping chunk")
                     continue
-            
+
         except Exception as frame_error:
             print(f"   ⚠️ Frame processing error: {frame_error}")
-        
+
         return frame_accumulator, total_processed
     
     def _extract_lazy_frames_safely(self) -> List[pl.LazyFrame]:
@@ -3171,31 +2621,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         return None
        
-    def filter(self, *predicates) -> 'UnifiedLazyDataFrame':
-        """Filter with chain preservation."""
-        # CRITICAL FIX: Define transform_meta before use
-        transform_meta = TransformationMetadata(
-            operation='filter',
-            parameters={'predicates': str(predicates)}
-        )
-        
-        predicate = pl.all(predicates) if len(predicates) > 1 else predicates[0]
-        filter_node = GraphNode(
-            op_type=ComputeOpType.FILTER,
-            operation=lambda df: df.filter(predicate),
-            inputs=[self._get_root_node()],
-            metadata={'predicate': str(predicate)}
-        )
-        
-        new_compute = self._create_compute_capability(
-            filter_node,
-            int(self._estimated_rows * 0.5)  # Conservative estimate
-        )
-        
-        return self._create_derived_dataframe(
-            new_compute=new_compute,
-            transformation_metadata=transform_meta
-        )
+    # filter is defined earlier; keep a single implementation to avoid ambiguity.
     
     def groupby(self, by, **kwargs) -> 'LazyGroupBy':
         """
@@ -3281,8 +2707,14 @@ class UnifiedLazyDataFrame(Generic[T]):
         start_time = time.time()
         
         if self._lazy_frames:
-            # Collect from lazy frames
-            result = pl.concat([lf.collect() for lf in self._lazy_frames])
+            # Collect from lazy frames (prefer streaming to reduce peaks)
+            dfs = []
+            for lf in self._lazy_frames:
+                try:
+                    dfs.append(lf.collect(streaming=True))
+                except Exception:
+                    dfs.append(lf.collect())
+            result = pl.concat(dfs) if dfs else pl.DataFrame()
         else:
             # Materialize from compute capability
             result = self._compute.materialize()
@@ -3375,7 +2807,7 @@ class UnifiedLazyDataFrame(Generic[T]):
 
 _original_create_derived_dataframe = UnifiedLazyDataFrame._create_derived_dataframe
 
-def _create_derived_dataframe_with_estimation(self, new_compute, new_schema=None,
+def _create_derived_dataframe_with_estimation(self, new_compute, new_schema=None, 
                                             transformation_metadata=None, **kwargs):
     """Enhanced wrapper with estimation propagation."""
     # Call original implementation
@@ -3408,366 +2840,6 @@ def _create_derived_dataframe_with_estimation(self, new_compute, new_schema=None
 
 # Replace the method
 UnifiedLazyDataFrame._create_derived_dataframe = _create_derived_dataframe_with_estimation
-
-# ============================================================================
-# LazyColumnAccessor Implementation
-# ============================================================================
-
-class LazyColumnAccessor:
-    """
-    Column accessor that maintains compute graph semantics.
-    
-    Innovation: Seamless transition between lazy and eager operations
-    while preserving the compute-first architecture.
-    """
-    
-    def __init__(self, 
-                 compute: ComputeCapability,
-                 column_name: str,
-                 parent_ref: Optional[weakref.ref] = None):
-        """
-        Initialize column accessor.
-        
-        Args:
-            compute: Compute capability for this column
-            column_name: Name of the column
-            parent_ref: Weak reference to parent DataFrame
-        """
-        self._compute = compute
-        self._column_name = column_name
-        self._parent_ref = parent_ref
-        self._stats_cache = None
-    
-    def __getattr__(self, name):
-        """
-        Delegate method calls to compute graph.
-        
-        Example: column.mean() → compute.aggregate('mean')
-        """
-        # Statistical methods
-        if name in ['mean', 'sum', 'min', 'max', 'std', 'var', 'count']:
-            return self._create_statistical_method(name)
-        
-        # String methods
-        elif name in ['lower', 'upper', 'strip', 'contains', 'startswith', 'endswith']:
-            return self._create_string_method(name)
-        
-        # Datetime methods
-        elif name in ['year', 'month', 'day', 'hour', 'minute', 'second']:
-            return self._create_datetime_method(name)
-        
-        else:
-            raise AttributeError(f"Column accessor has no attribute '{name}'")
-    
-    def _create_statistical_method(self, method: str):
-        """Create a statistical aggregation method."""
-        def statistical_operation():
-            # Create aggregation node
-            agg_node = GraphNode(
-                op_type=ComputeOpType.AGGREGATE,
-                operation=lambda df: getattr(df[self._column_name], method)(),
-                inputs=[self._compute.root_node if hasattr(self._compute, 'root_node') else None],
-                metadata={'method': method, 'column': self._column_name}
-            )
-            
-            # Execute and return result
-            if hasattr(self._compute, 'engine'):
-                engine = self._compute.engine()
-                if engine:
-                    return engine._execute_graph(agg_node, 1)
-            
-            # Fallback
-            materialized = self._compute.materialize()
-            return getattr(materialized[self._column_name], method)()
-        
-        return statistical_operation
-    
-    def _create_string_method(self, method: str):
-        """Create a string operation method."""
-        def string_operation(*args, **kwargs):
-            # Create transformation node
-            if method in ['contains', 'startswith', 'endswith']:
-                operation = lambda df: getattr(df[self._column_name].str, method)(*args, **kwargs)
-            else:
-                operation = lambda df: getattr(df[self._column_name].str, method)()
-            
-            transform_node = GraphNode(
-                op_type=ComputeOpType.MAP,
-                operation=operation,
-                inputs=[self._compute.root_node if hasattr(self._compute, 'root_node') else None],
-                metadata={'method': method, 'column': self._column_name}
-            )
-            
-            # Return new column accessor
-            if isinstance(self._compute, LazyComputeCapability):
-                new_compute = LazyComputeCapability(
-                    root_node=transform_node,
-                    engine=self._compute.engine,
-                    estimated_size=self._compute.estimated_size,
-                    schema={self._column_name: str}
-                )
-            else:
-                new_compute = self._compute.transform(operation)
-            
-            return LazyColumnAccessor(new_compute, self._column_name, self._parent_ref)
-        
-        return string_operation
-    
-    def _create_datetime_method(self, method: str):
-        """Create a datetime extraction method."""
-        def datetime_operation():
-            # Create extraction node
-            operation = lambda df: getattr(df[self._column_name].dt, method)()
-            
-            extract_node = GraphNode(
-                op_type=ComputeOpType.MAP,
-                operation=operation,
-                inputs=[self._compute.root_node if hasattr(self._compute, 'root_node') else None],
-                metadata={'method': method, 'column': self._column_name}
-            )
-            
-            # Return new column accessor
-            if isinstance(self._compute, LazyComputeCapability):
-                new_compute = LazyComputeCapability(
-                    root_node=extract_node,
-                    engine=self._compute.engine,
-                    estimated_size=self._compute.estimated_size,
-                    schema={self._column_name: int}
-                )
-            else:
-                new_compute = self._compute.transform(operation)
-            
-            return LazyColumnAccessor(new_compute, self._column_name, self._parent_ref)
-        
-        return datetime_operation
-    
-    def astype(self, dtype) -> 'LazyColumnAccessor':
-        """
-        Lazy type conversion with validation.
-        
-        Performance features:
-        - Sample-based validation
-        - Automatic optimization for compatible types
-        - Zero-copy when possible
-        """
-        # Create cast node
-        cast_node = GraphNode(
-            op_type=ComputeOpType.MAP,
-            operation=lambda df: df[self._column_name].cast(dtype),
-            inputs=[self._compute.root_node if hasattr(self._compute, 'root_node') else None],
-            metadata={'dtype': str(dtype), 'column': self._column_name}
-        )
-        
-        # Create new compute capability
-        if isinstance(self._compute, LazyComputeCapability):
-            new_compute = LazyComputeCapability(
-                root_node=cast_node,
-                engine=self._compute.engine,
-                estimated_size=self._compute.estimated_size,
-                schema={self._column_name: dtype}
-            )
-        else:
-            new_compute = self._compute.transform(
-                lambda df: df[self._column_name].cast(dtype)
-            )
-        
-        return LazyColumnAccessor(new_compute, self._column_name, self._parent_ref)
-    
-    def apply(self, func, meta=None) -> 'LazyColumnAccessor':
-        """
-        User-defined function application with optimization.
-        
-        Critical: Attempts to vectorize or JIT compile UDFs for performance.
-        """
-        # Analyze function for optimization
-        is_vectorizable = self._check_vectorizable(func)
-        
-        if is_vectorizable:
-            # Vectorized execution
-            operation = lambda df: df[self._column_name].map_elements(func)
-        else:
-            # Standard apply
-            operation = lambda df: df[self._column_name].apply(func)
-        
-        # Create UDF node
-        udf_node = GraphNode(
-            op_type=ComputeOpType.MAP,
-            operation=operation,
-            inputs=[self._compute.root_node if hasattr(self._compute, 'root_node') else None],
-            metadata={
-                'udf': func.__name__ if hasattr(func, '__name__') else 'anonymous',
-                'vectorizable': is_vectorizable,
-                'column': self._column_name
-            }
-        )
-        
-        # Create new compute capability
-        if isinstance(self._compute, LazyComputeCapability):
-            new_compute = LazyComputeCapability(
-                root_node=udf_node,
-                engine=self._compute.engine,
-                estimated_size=self._compute.estimated_size,
-                schema={self._column_name: meta} if meta else None
-            )
-        else:
-            new_compute = self._compute.transform(operation)
-        
-        return LazyColumnAccessor(new_compute, self._column_name, self._parent_ref)
-    
-    def _check_vectorizable(self, func) -> bool:
-        """Check if function can be vectorized."""
-        # Simple heuristic - in production, use more sophisticated analysis
-        try:
-            # Check if function works on arrays
-            import inspect
-            sig = inspect.signature(func)
-            return len(sig.parameters) == 1
-        except Exception:
-            return False
-    
-    def to_numpy(self) -> np.ndarray:
-        """Materialize column to numpy array."""
-        materialized = self._compute.materialize()
-        if hasattr(materialized, 'to_numpy'):
-            return materialized.to_numpy()
-        else:
-            return np.array(materialized)
-    
-    def to_list(self) -> List[Any]:
-        """Materialize column to Python list."""
-        return self.to_numpy().tolist()
-
-
-# ============================================================================
-# LazyGroupBy Implementation
-# ============================================================================
-
-class LazyGroupBy:
-    """
-    Lazy group-by operation that delays aggregation specification.
-    
-    This enables optimization of the entire group-aggregate pipeline
-    by seeing all operations before execution.
-    """
-    
-    def __init__(self, 
-                 parent_df: UnifiedLazyDataFrame,
-                 grouping_keys: List[str],
-                 optimization_hints: Optional[Dict[str, Any]] = None):
-        """
-        Initialize lazy group-by.
-        
-        Args:
-            parent_df: Parent DataFrame
-            grouping_keys: Columns to group by
-            optimization_hints: Hints for optimization
-        """
-        self._parent_df = parent_df
-        self._grouping_keys = grouping_keys
-        self._optimization_hints = optimization_hints or {}
-        self._aggregations = []
-    
-    def agg(self, *aggregations, **named_aggregations) -> UnifiedLazyDataFrame:
-        """
-        Specify aggregations and execute group-by.
-        
-        Supports both positional and named aggregations.
-        """
-        # Collect all aggregations
-        agg_specs = list(aggregations)
-        
-        for name, agg in named_aggregations.items():
-            if isinstance(agg, str):
-                # Simple aggregation like 'mean', 'sum'
-                agg_specs.append(pl.col(name).agg(agg).alias(f"{name}_{agg}"))
-            else:
-                agg_specs.append(agg.alias(name))
-        
-        # Create aggregation operation
-        def group_aggregate(df):
-            return df.group_by(self._grouping_keys).agg(agg_specs)
-        
-        # Create aggregation node
-        agg_node = GraphNode(
-            op_type=ComputeOpType.AGGREGATE,
-            operation=group_aggregate,
-            inputs=[self._parent_df._get_root_node()],
-            metadata={
-                'group_by': self._grouping_keys,
-                'aggregations': len(agg_specs),
-                'memory_intensive': True
-            }
-        )
-        
-        # Estimate result size
-        estimated_groups = self._parent_df._estimate_group_count(self._grouping_keys)
-        
-        # Create new compute capability
-        if isinstance(self._parent_df._compute, LazyComputeCapability):
-            new_compute = LazyComputeCapability(
-                root_node=agg_node,
-                engine=self._parent_df._compute.engine,
-                estimated_size=estimated_groups,
-                schema=self._infer_agg_schema(agg_specs)
-            )
-        else:
-            new_compute = self._parent_df._compute.transform(group_aggregate)
-        
-        # Create transformation metadata
-        transform_meta = TransformationMetadata(
-            operation='group_aggregate',
-            parameters={
-                'group_by': self._grouping_keys,
-                'aggregations': str(agg_specs)
-            },
-            parent_id=self._parent_df._transformation_metadata.id if self._parent_df._transformation_metadata else None
-        )
-        
-        return UnifiedLazyDataFrame(
-            compute=new_compute,
-            schema=self._infer_agg_schema(agg_specs),
-            metadata=self._parent_df._metadata.copy(),
-            memory_budget_gb=self._parent_df.memory_budget_gb,
-            materialization_threshold=self._parent_df.materialization_threshold,
-            transformation_metadata=transform_meta,
-             parent_chain=self._transformation_chain.get_lineage() 
-        )
-    
-    def _infer_agg_schema(self, agg_specs: List[Any]) -> Dict[str, type]:
-        """Infer schema for aggregation result."""
-        schema = {}
-        
-        # Include grouping keys
-        if self._parent_df._schema:
-            for key in self._grouping_keys:
-                if key in self._parent_df._schema:
-                    schema[key] = self._parent_df._schema[key]
-        
-        # Add aggregation columns (simplified inference)
-        for i, agg in enumerate(agg_specs):
-            if hasattr(agg, 'alias'):
-                schema[f"agg_{i}"] = float  # Most aggregations produce numeric results
-        
-        return schema
-    
-    def count(self) -> UnifiedLazyDataFrame:
-        """Shorthand for count aggregation."""
-        return self.agg(pl.count().alias('count'))
-    
-    def mean(self, *columns) -> UnifiedLazyDataFrame:
-        """Shorthand for mean aggregation."""
-        if columns:
-            return self.agg(*[pl.col(c).mean().alias(f"{c}_mean") for c in columns])
-        else:
-            return self.agg(pl.all().mean())
-    
-    def sum(self, *columns) -> UnifiedLazyDataFrame:
-        """Shorthand for sum aggregation."""
-        if columns:
-            return self.agg(*[pl.col(c).sum().alias(f"{c}_sum") for c in columns])
-        else:
-            return self.agg(pl.all().sum())
-
 
 # ============================================================================
 # Factory Functions
@@ -3819,20 +2891,3 @@ def create_dataframe_from_compute(compute: ComputeCapability,
         compute=compute,
         schema=schema
     )
-
-
-# ============================================================================
-# Module Exports
-# ============================================================================
-
-__all__ = [
-    'UnifiedLazyDataFrame',
-    'LazyColumnAccessor',
-    'LazyGroupBy',
-    'AccessPattern',
-    'MaterializationStrategy',
-    'TransformationMetadata',
-    'DataTransformationChain',
-    'create_dataframe_from_parquet',
-    'create_dataframe_from_compute'
-]

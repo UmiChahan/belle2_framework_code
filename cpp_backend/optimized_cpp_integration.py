@@ -64,7 +64,7 @@ class OptimizedStreamingHistogram:
     def __init__(self):
         # Import the integrator AFTER configuring OpenMP
         try:
-            from cpp_histogram_integrator import cpp_histogram_integrator
+            from .cpp_histogram_integrator import cpp_histogram_integrator
             self.cpp_integrator = cpp_histogram_integrator
             self._cpp_available = cpp_histogram_integrator.is_available()
             
@@ -300,10 +300,15 @@ class OptimizedStreamingHistogram:
                 lazy_frames, column, bins, min_val, max_val
             )
         else:
-            # For small datasets, use direct approach
-            hist_counts, total_processed = self._compute_direct_cpp_safe(
-                lazy_frames, column, bins, min_val, max_val
-            )
+            # For small datasets, use direct approach if C++ available; otherwise, Polars fallback
+            if algorithm == 'polars_fallback':
+                hist_counts, total_processed = self._compute_polars_fallback(
+                    lazy_frames, column, bins, min_val, max_val
+                )
+            else:
+                hist_counts, total_processed = self._compute_direct_cpp_safe(
+                    lazy_frames, column, bins, min_val, max_val
+                )
         
         # Handle density normalization
         if density and total_processed > 0:
@@ -321,6 +326,29 @@ class OptimizedStreamingHistogram:
               f"({throughput/1e6:.1f}M rows/s)")
         
         return hist_counts, bin_edges
+
+    def _compute_polars_fallback(self, lazy_frames: List[pl.LazyFrame], column: str,
+                                 bins: int, min_val: float, max_val: float) -> Tuple[np.ndarray, int]:
+        """Compute histogram using Polars as safe fallback with proper measurement."""
+        hist_counts = np.zeros(bins, dtype=np.uint64)
+        total_processed = 0
+
+        for lf in lazy_frames:
+            try:
+                df = (
+                    lf.select(pl.col(column))
+                      .filter(pl.col(column).is_between(min_val, max_val, closed='both'))
+                      .collect(engine="streaming")
+                )
+                if len(df) == 0:
+                    continue
+                data = df[column].to_numpy()
+                counts, _ = np.histogram(data, bins=bins, range=(min_val, max_val))
+                hist_counts += counts.astype(np.uint64)
+                total_processed += data.shape[0]
+            except Exception as e:
+                warnings.warn(f"Polars fallback failed on frame: {e}")
+        return hist_counts, total_processed
     
     def _select_algorithm_safe(self, dataset_stats: Dict[str, Any], bins: int) -> str:
         """Select algorithm based on dataset size AND system resources."""

@@ -121,76 +121,76 @@ class LazyFrameMetadataHandler:
             return {'analysis_failed': True, 'error': str(e)}
 
 # STRATEGIC IMPLEMENTATION: Enhanced estimate_memory with robust patterns
-def estimate_memory_enhanced(self) -> int:
-    """
-    TRANSFORMED: Memory estimation with systematic LazyFrame handling.
-    
-    ARCHITECTURAL IMPROVEMENTS:
-    1. Eliminates boolean context errors
-    2. Provides sophisticated LazyFrame analysis
-    3. Enables optimization decision-making
-    4. Maintains backward compatibility
-    """
-    # Base estimation logic
-    bytes_per_element = 8
-    
-    if self.schema:
-        total_bytes = 0
-        for col, dtype in self.schema.items():
-            if dtype == bool:
-                bytes_per_col = 1
-            elif dtype == pl.Float32:
-                bytes_per_col = 4
-            elif dtype == pl.Float64:
-                bytes_per_col = 8
-            elif dtype == pl.String:
-                bytes_per_col = 50  # Estimated average string size
-            elif dtype == pl.Categorical:
-                bytes_per_col = 4   # Categorical as integer reference
-            else:
-                bytes_per_col = 8
-            total_bytes += bytes_per_col
-        bytes_per_element = total_bytes
-    
-    base_estimate = self.estimated_size * bytes_per_element
-    
-    # STRATEGIC ENHANCEMENT: Robust metadata handling
-    if hasattr(self, 'root_node') and hasattr(self.root_node, 'metadata'):
-        metadata = self.root_node.metadata
+    def estimate_memory_enhanced(self) -> int:
+        """
+        TRANSFORMED: Memory estimation with systematic LazyFrame handling.
         
-        # SAFE PATTERN: Check for LazyFrame without boolean evaluation
-        if LazyFrameMetadataHandler.safe_metadata_check(metadata, 'original_frame'):
-            original_frame = LazyFrameMetadataHandler.safe_metadata_get(
-                metadata, 'original_frame', pl.LazyFrame
-            )
+        ARCHITECTURAL IMPROVEMENTS:
+        1. Eliminates boolean context errors
+        2. Provides sophisticated LazyFrame analysis
+        3. Enables optimization decision-making
+        4. Maintains backward compatibility
+        """
+        # Base estimation logic
+        bytes_per_element = 8
+        
+        if self.schema:
+            total_bytes = 0
+            for col, dtype in self.schema.items():
+                if dtype == bool:
+                    bytes_per_col = 1
+                elif dtype == pl.Float32:
+                    bytes_per_col = 4
+                elif dtype == pl.Float64:
+                    bytes_per_col = 8
+                elif dtype == pl.String:
+                    bytes_per_col = 50  # Estimated average string size
+                elif dtype == pl.Categorical:
+                    bytes_per_col = 4   # Categorical as integer reference
+                else:
+                    bytes_per_col = 8
+                total_bytes += bytes_per_col
+            bytes_per_element = total_bytes
+        
+        base_estimate = self.estimated_size * bytes_per_element
+        
+        # STRATEGIC ENHANCEMENT: Robust metadata handling
+        if hasattr(self, 'root_node') and hasattr(self.root_node, 'metadata'):
+            metadata = self.root_node.metadata
             
-            if original_frame is not None:
-                # Enhanced LazyFrame-specific estimation
-                try:
-                    frame_analysis = LazyFrameMetadataHandler.analyze_lazyframe_metadata(original_frame)
-                    
-                    if 'estimated_memory_per_row' in frame_analysis:
-                        refined_estimate = int(self.estimated_size * frame_analysis['estimated_memory_per_row'])
+            # SAFE PATTERN: Check for LazyFrame without boolean evaluation
+            if LazyFrameMetadataHandler.safe_metadata_check(metadata, 'original_frame'):
+                original_frame = LazyFrameMetadataHandler.safe_metadata_get(
+                    metadata, 'original_frame', pl.LazyFrame
+                )
+                
+                if original_frame is not None:
+                    # Enhanced LazyFrame-specific estimation
+                    try:
+                        frame_analysis = LazyFrameMetadataHandler.analyze_lazyframe_metadata(original_frame)
                         
-                        # Use refined estimate if it seems reasonable
-                        if 0 < refined_estimate < base_estimate * 10:  # Sanity check
-                            base_estimate = refined_estimate
+                        if 'estimated_memory_per_row' in frame_analysis:
+                            refined_estimate = int(self.estimated_size * frame_analysis['estimated_memory_per_row'])
                             
-                except Exception as e:
-                    warnings.warn(f"LazyFrame memory estimation failed: {e}")
+                            # Use refined estimate if it seems reasonable
+                            if 0 < refined_estimate < base_estimate * 10:  # Sanity check
+                                base_estimate = refined_estimate
+                                
+                    except Exception as e:
+                        warnings.warn(f"LazyFrame memory estimation failed: {e}")
+            
+            # Check for pre-computed analysis
+            if LazyFrameMetadataHandler.safe_metadata_check(metadata, 'memory_analysis'):
+                analysis = LazyFrameMetadataHandler.safe_metadata_get(metadata, 'memory_analysis', dict)
+                if analysis and 'estimated_memory_per_row' in analysis:
+                    base_estimate = int(self.estimated_size * analysis['estimated_memory_per_row'])
         
-        # Check for pre-computed analysis
-        if LazyFrameMetadataHandler.safe_metadata_check(metadata, 'memory_analysis'):
-            analysis = LazyFrameMetadataHandler.safe_metadata_get(metadata, 'memory_analysis', dict)
-            if analysis and 'estimated_memory_per_row' in analysis:
-                base_estimate = int(self.estimated_size * analysis['estimated_memory_per_row'])
-    
-    # Apply adaptive corrections
-    engine = self.engine() if hasattr(self, 'engine') and callable(self.engine) else None
-    if engine and hasattr(engine, 'memory_estimator'):
-        return engine.memory_estimator.estimate(self.root_node, base_estimate)
-    
-    return base_estimate
+        # Apply adaptive corrections
+        engine = self.engine() if hasattr(self, 'engine') and callable(self.engine) else None
+        if engine and hasattr(engine, 'memory_estimator'):
+            return engine.memory_estimator.estimate(self.root_node, base_estimate)
+        
+        return base_estimate
 
 # COMPREHENSIVE PATTERN SCANNING FRAMEWORK
 class LazyFramePatternScanner:
