@@ -439,6 +439,48 @@ class LazyComputeCapability(ComputeCapability[T]):
             
         return result
     
+    def to_lazy_frames(self) -> List[pl.LazyFrame]:
+        """
+        CRITICAL METHOD: Convert compute graph to Polars LazyFrames.
+        
+        This method is essential for histogram execution to see transformed data.
+        Without this, histograms bypass the transformation chain and use original data.
+        """
+        try:
+            # Force materialization and convert to LazyFrame
+            materialized = self.materialize()
+            
+            # Handle different materialized types
+            if isinstance(materialized, pl.LazyFrame):
+                return [materialized]
+            elif isinstance(materialized, pl.DataFrame):
+                return [materialized.lazy()]
+            elif hasattr(materialized, '__iter__') and not isinstance(materialized, str):
+                # Handle list/iterator of DataFrames
+                frames = []
+                for item in materialized:
+                    if isinstance(item, pl.LazyFrame):
+                        frames.append(item)
+                    elif isinstance(item, pl.DataFrame):
+                        frames.append(item.lazy())
+                    else:
+                        # Convert other types to DataFrame first
+                        frames.append(pl.DataFrame(item).lazy())
+                return frames
+            else:
+                # Convert single object to DataFrame
+                return [pl.DataFrame(materialized).lazy()]
+                
+        except Exception as e:
+            # Fallback: try to extract from engine if available
+            engine = self.engine()
+            if engine and hasattr(engine, 'get_lazy_frames'):
+                return engine.get_lazy_frames()
+            
+            # Ultimate fallback: empty list (will be handled upstream)
+            print(f"   ⚠️ to_lazy_frames failed: {e}")
+            return []
+    
     def partition_compute(self, partitioner: Callable[[T], Dict[str, T]]) -> Dict[str, 'LazyComputeCapability[T]']:
         """Partition for parallel execution."""
         partition_node = GraphNode(

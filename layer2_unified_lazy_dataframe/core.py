@@ -1542,6 +1542,8 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Phase 1: Strategy Selection (ENHANCED)
         # ========================================
+        # Optional: suppress verbose logging for batch/broadcast callers
+        print_logs = bool(kwargs.get('log_performance', True))
         if force_strategy:
             strategy = force_strategy
         else:
@@ -1549,7 +1551,8 @@ class UnifiedLazyDataFrame(Generic[T]):
             strategy = chosen_strategy
         
         metrics.strategy = strategy
-        print(f"📊 Histogram computation for '{column}' using {strategy.name} strategy")
+        if print_logs:
+            print(f"📊 Histogram computation for '{column}' using {strategy.name} strategy")
         
         # Phase 2: Range Determination (MERGED)
         # ======================================
@@ -1581,7 +1584,8 @@ class UnifiedLazyDataFrame(Generic[T]):
 
         except Exception as primary_error:
             # HEAD: Graceful degradation with cascade
-            print(f"   ⚠️ {strategy.name} failed: {str(primary_error)}, attempting fallback")
+            if print_logs:
+                print(f"   ⚠️ {strategy.name} failed: {str(primary_error)}, attempting fallback")
             metrics.errors_recovered += 1
 
             fallback_strategies = [
@@ -1592,18 +1596,21 @@ class UnifiedLazyDataFrame(Generic[T]):
             from .histogram.executors import get_executor
             for fallback in fallback_strategies:
                 try:
-                    print(f"   🔄 Attempting {fallback.name} strategy")
+                    if print_logs:
+                        print(f"   🔄 Attempting {fallback.name} strategy")
                     metrics.strategy = fallback
                     executor = get_executor(self, fallback)
                     result = executor.execute(ctx, range, metrics)
                     break
                 except Exception as fallback_error:
-                    print(f"   ❌ {fallback.name} also failed: {str(fallback_error)}")
+                    if print_logs:
+                        print(f"   ❌ {fallback.name} also failed: {str(fallback_error)}")
                     metrics.errors_recovered += 1
                     continue
             else:
                 # All strategies failed - return empty histogram
-                print("   ❌ All strategies failed, returning empty histogram")
+                if print_logs:
+                    print("   ❌ All strategies failed, returning empty histogram")
                 result = (np.zeros(bins, dtype=np.float64), np.linspace(0, 1, bins + 1))
         
         # Phase 4: Finalization and Metrics
@@ -1615,7 +1622,8 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Preserve negative sentinel (-1) to indicate unknown memory peak
         
         # Log performance metrics
-        self._log_histogram_performance(metrics)
+        if print_logs:
+            self._log_histogram_performance(metrics)
         
         # Adaptive optimization - record performance for future strategy selection
         self._record_histogram_performance(column, metrics)
@@ -1641,6 +1649,9 @@ class UnifiedLazyDataFrame(Generic[T]):
                 'time_budget_s': float(time_budget_s) if time_budget_s is not None else None,
                 'early_exit': bool(getattr(self, '_hist_early_exit', False)),
                 'decision_confidence': float(getattr(decision, 'confidence', 0.0)),
+                # New: rows scanned vs in-range if available
+                'rows_scanned': int(getattr(metrics, 'rows_scanned', -1)) if hasattr(metrics, 'rows_scanned') else None,
+                'in_range': int(getattr(metrics, 'in_range', -1)) if hasattr(metrics, 'in_range') else None,
             }
             # Optional metrics callback
             try:
@@ -2365,10 +2376,35 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Update metrics
         # Prefer measured processed rows when density is False; otherwise, fall back to estimate
         try:
+            # Update total_rows to a measured estimate for better efficiency reporting
+            try:
+                measured_total = int(self.measured_row_count(sample_frames=2))
+                if measured_total > 0:
+                    metrics.total_rows = measured_total
+            except Exception:
+                pass
             if not density and isinstance(counts, np.ndarray):
                 metrics.processed_rows = int(np.sum(counts))
             else:
                 metrics.processed_rows = self._estimated_rows
+            # Capture rows scanned (pre-range) if engine exposed it
+            rows_scanned = getattr(self._histogram_engine, '_last_rows_scanned', None)
+            if isinstance(rows_scanned, int) and rows_scanned >= 0:
+                metrics.rows_scanned = rows_scanned  # type: ignore[attr-defined]
+            in_range = getattr(self._histogram_engine, '_last_in_range', None)
+            if isinstance(in_range, int) and in_range >= 0:
+                metrics.in_range = in_range  # type: ignore[attr-defined]
+            # Sanity: warn on large mismatch between measured total and rows scanned
+            try:
+                if isinstance(rows_scanned, int) and rows_scanned > 0 and measured_total > 0:
+                    ratio = max(rows_scanned, measured_total) / max(1, min(rows_scanned, measured_total))
+                    if ratio >= 3.0:
+                        print(
+                            f"   ⚠️ Row-accounting mismatch: measured_total≈{measured_total:,} vs rows_scanned={rows_scanned:,}. "
+                            f"Investigate frame extraction or transforms."
+                        )
+            except Exception:
+                pass
         except Exception:
             metrics.processed_rows = self._estimated_rows
         metrics.chunks_processed = len(lazy_frames)
@@ -2654,31 +2690,52 @@ class UnifiedLazyDataFrame(Generic[T]):
         return acc.astype(np.float64, copy=False), int(rows)
     
     def _extract_lazy_frames_safely(self) -> List[pl.LazyFrame]:
-        """Safely extract lazy frames with multiple fallback strategies."""
+        """
+        Safely extract lazy frames with transformation-aware priority.
         
-        # Direct lazy frames
-        if hasattr(self, '_lazy_frames') and self._lazy_frames:
-            return self._lazy_frames
-        
-        # Try to extract from compute graph
+        CRITICAL FIX: Always prioritize compute graph over direct frames
+        to ensure histogram execution sees transformed data (e.g., oneCandOnly).
+        """
+        # PRIORITY 1: Always try compute graph first (transformation-aware)
         if hasattr(self, '_compute'):
-            if hasattr(self._compute, 'to_lazy_frames'):
-                return self._compute.to_lazy_frames()
-            
-            # Try to create lazy wrapper
-            if hasattr(self._compute, 'materialize'):
-                def lazy_wrapper():
+            try:
+                if hasattr(self._compute, 'to_lazy_frames'):
+                    frames = self._compute.to_lazy_frames()
+                    if frames:
+                        return frames
+                        
+                # Fallback: Create lazy wrapper around materialization
+                if hasattr(self._compute, 'materialize'):
                     materialized = self._compute.materialize()
                     if isinstance(materialized, pl.DataFrame):
-                        return materialized.lazy()
+                        return [materialized.lazy()]
                     elif isinstance(materialized, pl.LazyFrame):
-                        return materialized
+                        return [materialized]
                     else:
                         # Convert to Polars
-                        return pl.DataFrame(materialized).lazy()
-                
-                return [lazy_wrapper()]
+                        return [pl.DataFrame(materialized).lazy()]
+            except Exception as e:
+                # Log the failure but continue to fallback
+                print(f"   ⚠️ Compute graph extraction failed: {e}, falling back to direct frames")
         
+        # PRIORITY 2: Check transformation chain existence
+        try:
+            has_transforms = False
+            if hasattr(self, '_transformation_chain') and self._transformation_chain:
+                lineage = self._transformation_chain.get_lineage()
+                has_transforms = bool(lineage)
+                
+            # If we have transforms but compute failed, warn about potential data mismatch
+            if has_transforms:
+                print(f"   🚨 WARNING: Using direct frames despite {len(lineage)} transformations in chain!")
+                print(f"   🚨 This may cause histogram/measurement discrepancies!")
+        except Exception:
+            has_transforms = False
+
+        # PRIORITY 3: Direct lazy frames (only safe if no transformations)
+        if hasattr(self, '_lazy_frames') and self._lazy_frames:
+            return self._lazy_frames
+
         # Last resort - empty list
         return []
      
@@ -3010,6 +3067,39 @@ class UnifiedLazyDataFrame(Generic[T]):
             'metrics': getattr(self, '_last_hist_metrics', None),
         }
 
+    # ========================================================================
+    # Phase 4: Precise, streaming row accounting
+    # ========================================================================
+    def measured_row_count(self, sample_frames: int = 0) -> int:
+        """Return the measured number of rows by streaming counting.
+
+        - If sample_frames>0, count only the first N frames and scale; otherwise count all.
+        - Uses Polars lazy .select(pl.len()) and streaming collect for constant memory.
+        - Falls back to estimated rows on error.
+        """
+        try:
+            frames = self._extract_lazy_frames_safely()
+            if not frames:
+                return int(getattr(self, '_estimated_rows', 0))
+
+            total = 0
+            n = len(frames)
+            if sample_frames and sample_frames < n:
+                k = max(1, int(sample_frames))
+                for lf in frames[:k]:
+                    cnt = lf.select(pl.len()).collect(streaming=True).item()
+                    total += int(cnt)
+                # scale by ratio
+                scale = n / k
+                return int(total * scale)
+            else:
+                for lf in frames:
+                    cnt = lf.select(pl.len()).collect(streaming=True).item()
+                    total += int(cnt)
+                return int(total)
+        except Exception:
+            return int(getattr(self, '_estimated_rows', 0))
+
 _original_create_derived_dataframe = UnifiedLazyDataFrame._create_derived_dataframe
 
 def _create_derived_dataframe_with_estimation(self, new_compute, new_schema=None, 
@@ -3026,7 +3116,7 @@ def _create_derived_dataframe_with_estimation(self, new_compute, new_schema=None
         params = transformation_metadata.parameters
         
         # Physics-informed selectivity
-        if op == 'dataframe_oneCandOnly':
+        if op in ('oneCandOnly', 'dataframe_oneCandOnly'):
             # Use stored expectation or default
             result._estimated_rows = params.get('expected_rows', 
                                                max(100, int(self._estimated_rows * 0.1)))

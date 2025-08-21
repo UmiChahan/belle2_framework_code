@@ -19,6 +19,15 @@ import psutil
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Print-once / verbosity controls
+_PRINTED_OMP = False
+_PRINTED_PROCESS_LIMITS = False
+_PRINTED_CPP_ACTIVE = False
+_PRINTED_SYSTEM_ANALYSIS = False
+
+# Set to True to enable detailed runtime prints (kept quiet by default)
+PRINT_RUNTIME_INFO = False
+
 
 def configure_openmp_for_hpc():
     """
@@ -29,13 +38,16 @@ def configure_openmp_for_hpc():
     """
     # Limit OpenMP threads to prevent resource exhaustion
     # This should be called at the very beginning of your script
+    global _PRINTED_OMP
     if 'OMP_NUM_THREADS' not in os.environ:
         # Use a conservative number of threads
         cpu_count = psutil.cpu_count(logical=False) or 4
         # Limit to 8 threads max for OpenMP to leave room for Python threads
         omp_threads = min(cpu_count, 8)
         os.environ['OMP_NUM_THREADS'] = str(omp_threads)
-        print(f"🔧 Set OMP_NUM_THREADS={omp_threads}")
+        if not _PRINTED_OMP:
+            print(f"🔧 Set OMP_NUM_THREADS={omp_threads}")
+            _PRINTED_OMP = True
     
     # Disable dynamic thread adjustment to prevent unexpected thread creation
     os.environ['OMP_DYNAMIC'] = 'FALSE'
@@ -69,7 +81,10 @@ class OptimizedStreamingHistogram:
             self._cpp_available = cpp_histogram_integrator.is_available()
             
             if self._cpp_available:
-                print("✅ C++ histogram acceleration: ACTIVE")
+                global _PRINTED_CPP_ACTIVE
+                if not _PRINTED_CPP_ACTIVE:
+                    print("✅ C++ histogram acceleration: ACTIVE")
+                    _PRINTED_CPP_ACTIVE = True
                 self._analyze_system_capabilities()
             else:
                 print("⚠️ C++ acceleration not available, using optimized Polars")
@@ -93,7 +108,9 @@ class OptimizedStreamingHistogram:
         try:
             import resource
             soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NPROC)
-            print(f"📊 Process limits: soft={soft_limit}, hard={hard_limit}")
+            global _PRINTED_PROCESS_LIMITS
+            if not _PRINTED_PROCESS_LIMITS and PRINT_RUNTIME_INFO:
+                print(f"📊 Process limits: soft={soft_limit}, hard={hard_limit}")
             
             # Calculate safe thread counts
             # Reserve threads: main thread + OpenMP threads + safety margin
@@ -104,7 +121,8 @@ class OptimizedStreamingHistogram:
             available_for_pool = min(soft_limit - reserved_threads, 16)
             self.max_python_threads = max(1, available_for_pool)
             
-            print(f"🔧 Max Python threads: {self.max_python_threads}")
+            if PRINT_RUNTIME_INFO:
+                print(f"🔧 Max Python threads: {self.max_python_threads}")
             
         except Exception as e:
             print(f"⚠️ Could not determine thread limits: {e}")
@@ -124,9 +142,12 @@ class OptimizedStreamingHistogram:
         # Optimal chunk size calculation based on cache hierarchy
         self.optimal_chunk_elements = self._calculate_optimal_chunk_size()
         
-        print(f"📊 System analysis:")
-        print(f"   Available memory: {self.available_memory_gb:.1f} GB")
-        print(f"   Optimal chunk size: {self.optimal_chunk_elements:,} elements")
+        global _PRINTED_SYSTEM_ANALYSIS
+        if not _PRINTED_SYSTEM_ANALYSIS and PRINT_RUNTIME_INFO:
+            print(f"📊 System analysis:")
+            print(f"   Available memory: {self.available_memory_gb:.1f} GB")
+            print(f"   Optimal chunk size: {self.optimal_chunk_elements:,} elements")
+            _PRINTED_SYSTEM_ANALYSIS = True
     
     def _calculate_optimal_chunk_size(self) -> int:
         """Calculate optimal chunk size based on cache hierarchy."""
@@ -194,8 +215,9 @@ class OptimizedStreamingHistogram:
         # Use limited thread count
         thread_count = min(self.max_python_threads, len(lazy_frames))
         
-        print(f"🔀 Parallel processing with {thread_count} Python threads")
-        print(f"   (OpenMP using {os.environ.get('OMP_NUM_THREADS', 'default')} threads per computation)")
+        if PRINT_RUNTIME_INFO:
+            print(f"🔀 Parallel processing with {thread_count} Python threads")
+            print(f"   (OpenMP using {os.environ.get('OMP_NUM_THREADS', 'default')} threads per computation)")
         
         hist_counts = np.zeros(bins, dtype=np.uint64)
         total_processed = 0
@@ -324,7 +346,18 @@ class OptimizedStreamingHistogram:
         
         print(f"⚡ Histogram complete: {total_processed:,} rows in {elapsed:.2f}s "
               f"({throughput/1e6:.1f}M rows/s)")
-        
+        # Persist last-run diagnostics for callers
+        try:
+            self._last_rows_scanned = int(total_processed)
+            try:
+                self._last_in_range = int(hist_counts.sum())
+            except Exception:
+                self._last_in_range = None
+            self._last_elapsed_s = float(elapsed)
+            self._last_throughput_mps = float(throughput / 1e6)
+        except Exception:
+            pass
+
         return hist_counts, bin_edges
 
     def _compute_polars_fallback(self, lazy_frames: List[pl.LazyFrame], column: str,

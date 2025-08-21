@@ -15,29 +15,20 @@ Key Improvements:
 Author: Enhanced Architecture v3.0
 """
 
+# pylint: disable=import-error,wrong-import-order,too-many-lines,line-too-long,trailing-whitespace,f-string-without-interpolation,redefined-builtin
+
 import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any, Iterator, Callable, TypeVar
+from typing import Dict, List, Optional, Tuple, Union, Any, TypeVar
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import time
-import gc
 import warnings
-import weakref
-from contextlib import contextmanager
-import threading
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import functools
-from enum import Enum, auto
-import re
-import pickle
-import hashlib
 from datetime import datetime
-import inspect
-import psutil
 
 # Import Layer2 components (assuming they're available)
 from layer2_unified_lazy_dataframe import UnifiedLazyDataFrame, TransformationMetadata, DataTransformationChain
@@ -123,14 +114,15 @@ class WeightedDataFrame:
     def hist(self, column: str, bins: int = 50, 
              range: Optional[Tuple[float, float]] = None,
              density: bool = False, 
-             apply_weight: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+             apply_weight: bool = True,
+             **kwargs) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute histogram with automatic weight application.
         
         This provides a clean interface where weights are applied transparently.
         """
         # Get raw histogram from DataFrame
-        counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density)
+        counts, edges = self._dataframe.hist(column, bins=bins, range=range, density=density, **kwargs)
         
         # Apply weight if requested and available
         if apply_weight and self._weight and not self._weight.is_data:
@@ -152,29 +144,22 @@ class WeightedDataFrame:
         # Create result with preserved weight and engine
         result = WeightedDataFrame(new_df, self._weight, self._histogram_engine)
         
-        # Log estimation change if available (non-invasive)
-        if hasattr(self._dataframe, '_estimated_rows') and hasattr(new_df, '_estimated_rows'):
-            before = self._dataframe._estimated_rows
-            after = new_df._estimated_rows
-            if before and after and after != before:
-                print(f"   📊 {self._weight.process_name if self._weight else 'Process'}: "
-                      f"{before:,} → {after:,} rows (oneCandOnly)")
+        # Log estimation vs measured if available (non-invasive, constant memory)
+        try:
+            if hasattr(self._dataframe, '_estimated_rows') and hasattr(new_df, '_estimated_rows'):
+                before_est = int(getattr(self._dataframe, '_estimated_rows', 0))
+                after_est = int(getattr(new_df, '_estimated_rows', 0))
+                # Prefer a quick sample across up to 2 frames for before, precise for after
+                before_meas = int(self._dataframe.measured_row_count(sample_frames=2)) if hasattr(self._dataframe, 'measured_row_count') else before_est
+                after_meas = int(new_df.measured_row_count(sample_frames=0)) if hasattr(new_df, 'measured_row_count') else after_est
+                process_name = self._weight.process_name if self._weight else 'Process'
+                print(
+                    f"   📊 {process_name}: measured {before_meas:,} → {after_meas:,} (oneCandOnly)"
+                )
+        except Exception:
+            pass
         
         return result
-    
-    def __getattr__(self, name):
-        """Enhanced delegation for framework properties."""
-        # Priority list for direct delegation
-        framework_properties = {
-            '_estimated_rows', '_transformation_chain', '_schema',
-            '_metadata', '_compute_graph', '_operation_cache'
-        }
-        
-        if name in framework_properties:
-            return getattr(self._dataframe, name, None)
-        
-        # Standard delegation
-        return getattr(self._dataframe, name)
     
     def __setattr__(self, name, value):
         """Bidirectional property synchronization."""
@@ -191,25 +176,28 @@ class WeightedDataFrame:
     
     # Delegate all other methods to the DataFrame
     def __getattr__(self, name):
-        """Delegate attribute access to the DataFrame."""
-        # Check if it's a DataFrame method
+        """Delegate attribute access to the underlying DataFrame with wrapping."""
+        # Priority delegation for framework properties
+        framework_properties = {
+            '_estimated_rows', '_transformation_chain', '_schema',
+            '_metadata', '_compute_graph', '_operation_cache'
+        }
+        if name in framework_properties:
+            return getattr(self._dataframe, name, None)
+
         if hasattr(self._dataframe, name):
             attr = getattr(self._dataframe, name)
-            
-            # If it's a method that returns a DataFrame, wrap the result
+
             if callable(attr):
                 @functools.wraps(attr)
                 def wrapped_method(*args, **kwargs):
                     result = attr(*args, **kwargs)
-                    
-                    # If result is a DataFrame, wrap it with the same weight
                     if isinstance(result, UnifiedLazyDataFrame):
                         return WeightedDataFrame(result, self._weight, self._histogram_engine)
                     return result
-                
                 return wrapped_method
             return attr
-        
+
         raise AttributeError(f"'{self.__class__.__name__}' has no attribute '{name}'")
     
     # Properties that should be delegated
@@ -283,10 +271,11 @@ class WeightedProcessDict(OptimizedUltraLazyDict):
         for name, weighted_df in self.items():
             try:
                 if isinstance(weighted_df, WeightedDataFrame):
-                    results[name] = weighted_df.hist(column, apply_weight=apply_weights, **kwargs)
+                    # Suppress per-process performance printing in batch
+                    results[name] = weighted_df.hist(column, apply_weight=apply_weights, log_performance=False, **kwargs)
                 else:
                     # Fallback for non-weighted DataFrames
-                    results[name] = weighted_df.hist(column, **kwargs)
+                    results[name] = weighted_df.hist(column, log_performance=False, **kwargs)
             except Exception as e:
                 warnings.warn(f"Histogram computation failed for {name}: {e}")
                 results[name] = None
@@ -344,9 +333,9 @@ class WeightedBroadcastResult(BroadcastResult):
         for name, weighted_df in self._valid_results.items():
             try:
                 if isinstance(weighted_df, WeightedDataFrame):
-                    result = weighted_df.hist(column, apply_weight=apply_weights, **kwargs)
+                    result = weighted_df.hist(column, apply_weight=apply_weights, log_performance=False, **kwargs)
                 else:
-                    result = weighted_df.hist(column, **kwargs)
+                    result = weighted_df.hist(column, log_performance=False, **kwargs)
                 hist_results[name] = result
                 successful += 1
                 print(f"   ✅ {name}: Histogram computed")
@@ -451,6 +440,7 @@ class HistogramPipeline:
     
     def _polars_fallback(self, lazy_frames, column, bins, range, density, weight):
         """Polars-based histogram computation."""
+        start_time = time.time()
         if range is None:
             range = self._compute_range(lazy_frames, column)
         
@@ -821,6 +811,9 @@ class ParticleDataLoaderV3:
     
     def _apply_energy_filtering(self, process_directories: Dict[str, List[Path]]) -> Dict[str, List[Path]]:
         """Apply energy condition filtering."""
+        # Print-once guard to avoid duplicate banners when re-running in notebooks
+        if not hasattr(self, '_printed_energy_filter_banner'):
+            self._printed_energy_filter_banner = False
         energy_patterns = {
             'vpho': {
                 '5S_scan': {
@@ -863,9 +856,11 @@ class ParticleDataLoaderV3:
         
         filtered = {}
         
-        print(f"\n   🔍 Applying {energy_condition} energy filtering")
-        print(f"      Include patterns: {patterns['include']}")
-        print(f"      Exclude patterns: {patterns['exclude']}")
+        if not self._printed_energy_filter_banner:
+            print(f"\n   🔍 Applying {energy_condition} energy filtering")
+            print(f"      Include patterns: {patterns['include']}")
+            print(f"      Exclude patterns: {patterns['exclude']}")
+            self._printed_energy_filter_banner = True
         
         for dir_name, files in process_directories.items():
             name_lower = dir_name.lower()
@@ -883,7 +878,9 @@ class ParticleDataLoaderV3:
                 reason = "excluded" if exclude_match else "not included"
                 print(f"      ✗ Filtered out: {dir_name} ({reason})")
         
-        print(f"\n   📊 Filtering result: {len(filtered)}/{len(process_directories)} directories kept")
+        # Always print the summary once per loader lifetime; subsequent calls stay quiet
+        if self._printed_energy_filter_banner:
+            print(f"\n   📊 Filtering result: {len(filtered)}/{len(process_directories)} directories kept")
         
         return filtered
     
@@ -892,8 +889,8 @@ class ParticleDataLoaderV3:
                                      columns: Optional[List[str]],
                                      sample_fraction: Optional[float]) -> WeightedProcessDict:
         """Load each directory as a process."""
-        from layer2_unified_lazy_dataframe import UnifiedLazyDataFrame
-        
+        # UnifiedLazyDataFrame is available from module imports
+
         # Create luminosity manager
         luminosity_manager = EnhancedLuminosityManagerV3()
         
@@ -1178,8 +1175,8 @@ class ParticleDataLoaderV3:
                                      columns: Optional[List[str]],
                                      sample_fraction: Optional[float]) -> WeightedProcessDict:
         """Load flat structure files as processes."""
-        from layer2_unified_lazy_dataframe import UnifiedLazyDataFrame
-        
+        # UnifiedLazyDataFrame is available from module imports
+
         # Create luminosity manager
         luminosity_manager = EnhancedLuminosityManagerV3()
         
@@ -1355,7 +1352,8 @@ class ProgressiveAnalysisV3:
                     variable, 
                     bins=bins, 
                     range=range,
-                    apply_weight=self.config.apply_luminosity_weights
+                    apply_weight=self.config.apply_luminosity_weights,
+                    log_performance=False
                 )
                 hist_results[name] = (counts, edges)
                 
@@ -1387,9 +1385,10 @@ class ProgressiveAnalysisV3:
             return result
         
         elif stage == 'cuts' and cuts:
-            # Apply cuts sequentially
+            # Apply cuts to candidates data, not base data for now.
+            candidates_data = self._get_stage_data('candidates', None)
             result = {}
-            for name, weighted_df in self.base_data.items():
+            for name, weighted_df in candidates_data.items():
                 df = weighted_df
                 for cut in cuts:
                     df = df.query(cut)
@@ -1537,10 +1536,12 @@ class ProgressiveAnalysisV3:
                 if grouped['data'] is None:
                     grouped['data'] = (counts.copy(), edges, np.sqrt(counts))
                 else:
+                    prev_counts, _, _ = grouped['data']
+                    new_counts = prev_counts + counts
                     grouped['data'] = (
-                        grouped['data'][0] + counts,
+                        new_counts,
                         edges,
-                        np.sqrt(grouped['data'][0] + counts)
+                        np.sqrt(new_counts)
                     )
             else:
                 # Determine physics group
@@ -1630,55 +1631,79 @@ class ProgressiveAnalysisV3:
         """Create ratio panel with proper error propagation."""
         data_counts, edges, data_errors = data_hist
         mc_counts, mc_errors = mc_total
-        
+
+
         bin_centers = (edges[:-1] + edges[1:]) / 2
         bin_width = np.mean(np.diff(edges))
-        
+
         # Calculate ratio with proper error propagation
-        ratio = np.ones_like(data_counts)
-        ratio_err = np.zeros_like(data_counts)
-        
+        ratio = np.ones_like(data_counts, dtype=float)
+        ratio_err = np.zeros_like(data_counts, dtype=float)
+
+        # Valid bins for ratio (mc>0), keep data>=0 to avoid sign issues
         valid = (mc_counts > 0) & (data_counts >= 0)
-        ratio[valid] = data_counts[valid] / mc_counts[valid]
-        
-        # Error propagation
-        rel_data = np.zeros_like(data_counts)
-        rel_mc = np.zeros_like(mc_counts)
-        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio[valid] = data_counts[valid] / mc_counts[valid]
+
+        # Relative errors (guard non-finite)
+        rel_data = np.zeros_like(data_counts, dtype=float)
+        rel_mc = np.zeros_like(mc_counts, dtype=float)
+
         data_valid = (data_counts > 0) & valid
-        rel_data[data_valid] = data_errors[data_valid] / data_counts[data_valid]
-        rel_mc[valid] = mc_errors[valid] / mc_counts[valid]
-        
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rel_data[data_valid] = data_errors[data_valid] / data_counts[data_valid]
+            rel_mc[valid] = mc_errors[valid] / mc_counts[valid]
+
+        # Ratio error propagation, then sanitize non-negativity and finiteness
         ratio_err[valid] = ratio[valid] * np.sqrt(rel_data[valid]**2 + rel_mc[valid]**2)
-        
-        # Gray deviation bars
-        for i, (center, r) in enumerate(zip(bin_centers[valid], ratio[valid])):
-            height = abs(r - 1)
-            bottom = min(r, 1)
-            ax_ratio.bar(center, height, width=bin_width * 0.8,
-                        bottom=bottom, color='gray', alpha=0.5,
-                        edgecolor='none', zorder=10)
-        
-        # MC uncertainty band
-        ax_ratio.fill_between(bin_centers, 1 - rel_mc, 1 + rel_mc,
-                            alpha=0.3, color='yellow', zorder=5,
-                            label='MC uncertainty')
-        
-        # Data points
-        ax_ratio.errorbar(bin_centers[valid], ratio[valid], yerr=ratio_err[valid],
-                         fmt='o', color='black', markersize=4, zorder=100)
-        
-        # Unity line
-        ax_ratio.axhline(y=1, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
-        
-        # Smart y-range
+        # Sanitize arrays for plotting
+        ratio_err = np.abs(ratio_err)
+        ratio_err[~np.isfinite(ratio_err)] = 0.0
+
+        rel_mc = np.abs(rel_mc)
+        rel_mc[~np.isfinite(rel_mc)] = 0.0
+
+        # Gray deviation bars (only for valid bins)
         if np.any(valid):
-            y_values = ratio[valid]
-            y_median = np.median(y_values)
-            y_std = np.std(y_values)
+            for center, r in zip(bin_centers[valid], ratio[valid]):
+                height = abs(r - 1.0)
+                bottom = min(r, 1.0)
+                ax_ratio.bar(center, height, width=bin_width * 0.8,
+                             bottom=bottom, color='gray', alpha=0.5,
+                             edgecolor='none', zorder=10)
+
+        # MC uncertainty band (mask to valid mc bins)
+        valid_band = (mc_counts > 0) & np.isfinite(bin_centers) & np.isfinite(rel_mc)
+        if np.any(valid_band):
+            ax_ratio.fill_between(
+                bin_centers[valid_band],
+                1.0 - rel_mc[valid_band],
+                1.0 + rel_mc[valid_band],
+                alpha=0.3, color='yellow', zorder=5,
+                label='MC uncertainty'
+            )
+
+        # Data points (mask to valid and finite)
+        valid_points = valid & np.isfinite(bin_centers) & np.isfinite(ratio) & np.isfinite(ratio_err)
+        if np.any(valid_points):
+            ax_ratio.errorbar(
+                bin_centers[valid_points],
+                ratio[valid_points],
+                yerr=ratio_err[valid_points],
+                fmt='o', color='black', markersize=4, zorder=100
+            )
+
+        # Unity line
+        ax_ratio.axhline(y=1.0, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+
+        # Smart y-range
+        if np.any(valid_points):
+            y_values = ratio[valid_points]
+            y_median = float(np.median(y_values))
+            y_std = float(np.std(y_values))
             ax_ratio.set_ylim(
-                max(0.5, y_median - 2*y_std),
-                min(2.0, y_median + 2*y_std)
+                max(0.5, y_median - 2.0 * y_std),
+                min(2.0, y_median + 2.0 * y_std)
             )
     
     def _apply_belle2_styling(self, ax_main, ax_ratio, variable: str, stage: str):
@@ -1819,7 +1844,8 @@ class Belle2ProductionFrameworkV3(Belle2Layer2Framework):
         # Create luminosity manager
         self.luminosity_manager = EnhancedLuminosityManagerV3()
         
-        print(f"""
+        print(
+            """
         ╔════════════════════════════════════════════════════╗
         ║     Belle II Enhanced Production Framework v3      ║
         ║                                                    ║
@@ -1829,7 +1855,8 @@ class Belle2ProductionFrameworkV3(Belle2Layer2Framework):
         ║  ✓ Full backward compatibility                     ║
         ║  ✓ Energy filtering & method injection             ║
         ╚════════════════════════════════════════════════════╝
-        """)
+        """
+        )
     
     def load_particle_data(self, base_dir: str, 
                           particle: str = 'vpho',
