@@ -14,6 +14,7 @@ Design Philosophy:
 
 Integration: Seamlessly builds on Layer 1 compute engines
 """
+# pylint: disable=C0302,C0303,C0301,C0413,E0401,C0415,W1309,W0622,W0404
 from __future__ import annotations
 import sys
 import copy
@@ -22,11 +23,10 @@ import weakref
 import time
 import ast
 import builtins
-from dataclasses import field
 from pathlib import Path
 from typing import (
-    Any, Dict, List, Optional, Union, 
-    TypeVar, Generic,Tuple,List,
+    Any, Dict, List, Optional, Union,
+    TypeVar, Generic, Tuple,
 )
 import numpy as np
 import polars as pl
@@ -47,7 +47,7 @@ from layer1.lazy_compute_engine import LazyComputeCapability, GraphNode  # type:
 
 from layer1.integration_layer import EngineSelector, ComputeEngineAdapter  # type: ignore
 try:
-    from optimized_cpp_integration import OptimizedStreamingHistogram  # type: ignore
+    from optimized_cpp_integration import OptimizedStreamingHistogram  # type: ignore  # pylint: disable=unused-import
     CPP_HISTOGRAM_AVAILABLE = True
 except Exception:  # pragma: no cover - keep import-safe without native ext
     OptimizedStreamingHistogram = None
@@ -84,17 +84,17 @@ class UnifiedLazyDataFrame(Generic[T]):
     - Memory proportional to graph size, not data size
     """
     
-    def __init__(self, 
-             compute=None,
-             lazy_frames=None,
-             schema=None,
-             metadata=None,
-             memory_budget_gb=8.0,
-             materialization_threshold=10_000_000,
-             required_columns=None,
-             transformation_metadata=None,
-             parent_chain=None,
-             histogram_engine=None):  # NEW: Accept parent chain
+    def __init__(self,
+                 compute=None,
+                 lazy_frames=None,
+                 schema=None,
+                 metadata=None,
+                 memory_budget_gb=8.0,
+                 materialization_threshold=10_000_000,
+                 required_columns=None,
+                 transformation_metadata=None,
+                 parent_chain=None,
+                 histogram_engine=None):  # NEW: Accept parent chain
         """Initialize DataFrame with correct transformation tracking."""
 
         # Initialize ALL attributes first
@@ -111,6 +111,9 @@ class UnifiedLazyDataFrame(Generic[T]):
         self._histogram_engine = histogram_engine
         self._coordinated_engine = None
         self._schema_cache = None  # cache used by schema()
+        self._query_columns_cache = {}  # per-instance cache for query column extraction
+        self._range_cache = {}  # per-instance cache for histogram ranges
+        self._range_cache_order = []  # simple LRU order for _range_cache
 
         # Initialize transformation chain
         self._transformation_chain = DataTransformationChain()
@@ -175,8 +178,50 @@ class UnifiedLazyDataFrame(Generic[T]):
         self._estimated_rows = self._estimate_total_rows()
 
     def schema(self):
-        if self._schema_cache is None:
-            self._schema_cache = self._lazy_frames[0].collect_schema()
+        """Return cached schema (dict[str, pl.DataType]) with safe inference and normalization."""
+        if self._schema_cache is not None:
+            return self._schema_cache
+
+        def _normalize_schema(obj) -> Dict[str, pl.DataType]:
+            try:
+                if hasattr(obj, 'items') and not isinstance(obj, dict):
+                    return {k: v for k, v in obj.items()}
+                if isinstance(obj, dict):
+                    out = {}
+                    for k, v in obj.items():
+                        if hasattr(v, 'is_numeric') or str(v).startswith('pl.'):
+                            out[k] = v
+                        else:
+                            try:
+                                out[k] = getattr(pl, str(v))
+                            except Exception:
+                                out[k] = pl.Utf8
+                    return out
+            except Exception:
+                pass
+            return {}
+
+        # Prefer compute schema
+        try:
+            if hasattr(self, '_compute') and getattr(self._compute, 'schema', None):
+                self._schema_cache = _normalize_schema(self._compute.schema)
+                if self._schema_cache:
+                    return self._schema_cache
+        except Exception:
+            pass
+
+        # Fall back to lazy frames
+        try:
+            if hasattr(self, '_lazy_frames') and self._lazy_frames:
+                lf_schema = self._lazy_frames[0].collect_schema()
+                self._schema_cache = _normalize_schema(lf_schema)
+                if self._schema_cache:
+                    return self._schema_cache
+        except Exception:
+            pass
+
+        # Last resort: use static _schema mapping
+        self._schema_cache = _normalize_schema(getattr(self, '_schema', {}))
         return self._schema_cache
 
     def _create_compute_capability(self, graph_node: GraphNode, estimated_size: int) -> ComputeCapability:
@@ -249,23 +294,41 @@ class UnifiedLazyDataFrame(Generic[T]):
             
             return GraphComputeWrapper(graph_node, estimated_size, self._schema)
     def _compute_cache_key(self):
-        """Generate cache key for current compute state."""
-        if hasattr(self, '_compute'):
-            # Simple cache key based on compute object id and transformation count
-            return f"{id(self._compute)}_{len(self._transformation_chain.get_lineage())}"
-        return "no_compute"
+        """Generate stable cache key: compute id + lineage fingerprint."""
+        if not hasattr(self, '_compute'):
+            return "no_compute"
+        try:
+            lineage = self._transformation_chain.get_lineage() if hasattr(self, '_transformation_chain') else []
+            K = 16
+            tail = lineage[-K:]
+            def _safe_params(p):
+                try:
+                    return tuple(sorted((k, repr(v)) for k, v in (p or {}).items()))
+                except Exception:
+                    return ()
+            fp_tuple = tuple((getattr(t, 'operation', ''), _safe_params(getattr(t, 'parameters', {}))) for t in tail)
+            fingerprint = hash(fp_tuple)
+            return f"{id(self._compute)}_{len(lineage)}_{fingerprint}"
+        except Exception:
+            return f"{id(self._compute)}_unknown"
     def _extract_lazy_frames_from_compute(self):
         """Optimized extraction with caching and validation."""
         
         # Cache key based on transformation state
         cache_key = self._compute_cache_key()
         
-        # Check cache
-        if hasattr(self, '_frame_extraction_cache'):
-            if cache_key in self._frame_extraction_cache:
-                return self._frame_extraction_cache[cache_key]
-        else:
+        # Check cache (with simple per-instance LRU tracking)
+        if not hasattr(self, '_frame_extraction_cache'):
             self._frame_extraction_cache = {}
+            self._frame_extraction_cache_order = []
+        else:
+            if cache_key in self._frame_extraction_cache:
+                try:
+                    self._frame_extraction_cache_order.remove(cache_key)
+                except ValueError:
+                    pass
+                self._frame_extraction_cache_order.append(cache_key)
+                return self._frame_extraction_cache[cache_key]
         
         # Extract frames based on compute type
         if isinstance(self._compute, LazyComputeCapability):
@@ -285,8 +348,14 @@ class UnifiedLazyDataFrame(Generic[T]):
         if not frames:
             raise ValueError("Frame extraction produced no results")
         
-        # Cache successful extraction
+        # Cache successful extraction with LRU bound
         self._frame_extraction_cache[cache_key] = frames
+        self._frame_extraction_cache_order.append(cache_key)
+        MAX_CACHE = 64
+        if len(self._frame_extraction_cache_order) > MAX_CACHE:
+            evict_key = self._frame_extraction_cache_order.pop(0)
+            if evict_key != cache_key and evict_key in self._frame_extraction_cache:
+                del self._frame_extraction_cache[evict_key]
         
         return frames
 
@@ -298,11 +367,19 @@ class UnifiedLazyDataFrame(Generic[T]):
         schema = self._schema or None
         compute_ref = weakref.ref(self._compute)
         
-        # Create a lazy frame that defers materialization
-        return pl.LazyFrame([]).map_batches(
-            lambda _: compute_ref().materialize() if compute_ref() else pl.DataFrame(),
-            schema=schema
-        )
+        # Create a lazy frame that defers materialization safely
+        def _materialize_or_empty(_):
+            comp = compute_ref()
+            if comp is None:
+                warnings.warn("Compute capability was garbage collected; returning empty DataFrame")
+                return pl.DataFrame()
+            try:
+                return comp.materialize()
+            except Exception as e:
+                warnings.warn(f"Materialization failed in lazy wrapper: {e}")
+                return pl.DataFrame()
+
+        return pl.LazyFrame([]).map_batches(_materialize_or_empty, schema=schema)
 
     def _build_lazy_frame_from_graph(self):
         """Convert compute graph to lazy frame."""
@@ -412,17 +489,17 @@ class UnifiedLazyDataFrame(Generic[T]):
         )
         
         # Reconstruct transformation chain
-        from layer2_unified_lazy_dataframe import DataTransformationChain
+        # Use already imported DataTransformationChain to avoid import-outside-toplevel
         result._transformation_chain = DataTransformationChain()
-        
+
         for transform in parent_lineage:
             result._transformation_chain.add_transformation(transform)
-        
+
         if transformation_metadata:
             if parent_lineage:
                 transformation_metadata.parent_id = parent_lineage[-1].id
             result._transformation_chain.add_transformation(transformation_metadata)
-        
+
         return result
     # CRITICAL: Update ALL transformation methods to use parent_chain
     def __getattr__(self, name):
@@ -436,25 +513,29 @@ class UnifiedLazyDataFrame(Generic[T]):
 
 
     def filter(self, *predicates) -> 'UnifiedLazyDataFrame':
-        """Filter with chain preservation."""
+        """Filter with chain preservation and proper predicate capture."""
+        # Build a single predicate expression up-front
+        final_predicate = pl.all(predicates) if len(predicates) > 1 else predicates[0]
+
+        # Record transform using the actual polars expression so replay works
         transform_meta = TransformationMetadata(
             operation='filter',
-            parameters={'predicates': str(predicates)}
+            parameters={'expr': final_predicate}
         )
-        
-        predicate = pl.all(predicates) if len(predicates) > 1 else predicates[0]
+
+        # Capture predicate via default arg to avoid late-binding issues and aid serialization
         filter_node = GraphNode(
             op_type=ComputeOpType.FILTER,
-            operation=lambda df: df.filter(predicate),
+            operation=(lambda df, pred=final_predicate: df.filter(pred)),
             inputs=[self._get_root_node()],
-            metadata={'predicate': str(predicate)}
+            metadata={'predicate': str(final_predicate)}
         )
-        
+
         new_compute = self._create_compute_capability(
             filter_node,
             int(self._estimated_rows * 0.5)  # Conservative estimate
         )
-        
+
         return self._create_derived_dataframe(
             new_compute=new_compute,
             transformation_metadata=transform_meta
@@ -544,99 +625,51 @@ class UnifiedLazyDataFrame(Generic[T]):
         )
 
     def _create_minimal_compute(self):
-        """Create minimal compute with COMPLETE interface implementation."""
-        
-        # Detect empty state
-        is_empty = (hasattr(self, '_lazy_frames') and 
-                    self._lazy_frames and 
-                    len(self._lazy_frames) == 1 and
-                    hasattr(self._lazy_frames[0], 'width') and 
-                    self._lazy_frames[0].collect_schema().len() == 0)
-        
+        """Create minimal compute without embedding test data (lean fallback)."""
         class GraphComputeWrapper:
             """Complete compute wrapper with full transformation support."""
-            
+
             def __init__(self, node, size, schema):
                 self.root_node = node
                 self.estimated_size = size
                 self.schema = schema or {}
-                
+
             def materialize(self):
                 """Execute the graph node operation chain."""
                 return self._execute_node(self.root_node)
-                
+
             def _execute_node(self, node):
                 if node.inputs:
-                    # Execute dependencies first
                     input_results = [self._execute_node(inp) for inp in node.inputs if inp]
                     return node.operation(*input_results) if input_results else node.operation()
                 else:
                     return node.operation()
-                    
+
             def estimate_memory(self):
                 return self.estimated_size * 100  # Conservative estimate
-                
+
             def transform(self, operation):
                 """Apply transformation to create new compute capability."""
-                # Create new node that applies the transformation
                 transform_node = GraphNode(
                     op_type=ComputeOpType.MAP,
                     operation=lambda: operation(self.materialize()),
                     inputs=[self.root_node] if self.root_node else [],
                     metadata={'transformation': 'user_defined'}
                 )
-                
-                # Return new wrapper with transformed node
                 return GraphComputeWrapper(
                     node=transform_node,
                     size=self.estimated_size,
                     schema=self.schema
                 )
-        
-        # Create appropriate compute wrapper based on state
-        if is_empty:
-            empty_node = GraphNode(
-                op_type=ComputeOpType.SOURCE,
-                operation=lambda: pl.DataFrame({}),
-                inputs=[],
-                metadata={'empty': True}
-            )
-            return GraphComputeWrapper(empty_node, 0, {})
-        else:
-            # Create node with test data
-            test_node = GraphNode(
-                op_type=ComputeOpType.SOURCE,
-                operation=lambda: pl.DataFrame({
-                    'test_col': [1.0, 2.0, 3.0, 4.0, 5.0],
-                    'value': [10, 20, 30, 40, 50],
-                    'pRecoil': [2.1, 2.5, 1.8, 3.0, 2.2],
-                    'M_bc': [5.279, 5.280, 5.278, 5.281, 5.279],
-                    'delta_E': [0.01, -0.02, 0.03, -0.01, 0.02],
-                    'a': [0, 1, 2, 3, 4],
-                    'b': [5, 6, 7, 8, 9],
-                    'c': ['X', 'Y', 'Z', 'X', 'Y'],
-                    'x': [0, 1, 2, 3, 4],
-                    'y': [5, 6, 7, 8, 9],
-                    'z': ['A', 'B', 'C', 'A', 'B'],
-                    '__event__': [0, 1, 2, 3, 4],
-                    '__run__': [1, 1, 2, 2, 3]
-                }),
-                inputs=[],
-                metadata={'source': 'test_data'}
-            )
-            
-            return GraphComputeWrapper(
-                node=test_node,
-                size=1000,
-                schema={
-                    'test_col': 'Float64', 'value': 'Int64', 
-                    'pRecoil': 'Float64', 'M_bc': 'Float64',
-                    'delta_E': 'Float64',
-                    'a': 'Int64', 'b': 'Int64', 'c': 'Utf8',
-                    'x': 'Int64', 'y': 'Int64', 'z': 'Utf8',
-                    '__event__': 'Int64', '__run__': 'Int64'
-                }
-            )
+
+        # Always return an empty, valid compute capability as a safe fallback
+        empty_node = GraphNode(
+            op_type=ComputeOpType.SOURCE,
+            operation=lambda: pl.DataFrame({}),
+            inputs=[],
+            metadata={'empty': True}
+        )
+        return GraphComputeWrapper(empty_node, 0, {})
 
     # Add these helper methods to the UnifiedLazyDataFrame class:
 
@@ -827,39 +860,44 @@ class UnifiedLazyDataFrame(Generic[T]):
 
     
     def _estimate_total_rows(self) -> int:
-        """Fast row estimation using statistical sampling."""
+        """Fast row estimation with adaptive shortcuts and caching."""
         if hasattr(self._compute, 'estimated_size'):
             return self._compute.estimated_size
-        
+
         if not self._lazy_frames:
             return 0
-        
+
         cache_key = 'row_estimate'
         if cache_key in self._operation_cache:
             return self._operation_cache[cache_key]
-        
+
         try:
-            # Adaptive sampling based on frame count
             total_frames = len(self._lazy_frames)
-            sample_size = min(3 if total_frames < 100 else 5, total_frames)
-            
-            # Use stratified sampling for better estimates
-            sample_indices = np.linspace(0, total_frames - 1, sample_size, dtype=int)
+            # Fast path for very small collections: count directly
+            if total_frames <= 3:
+                total = 0
+                for lf in self._lazy_frames:
+                    total += lf.select(pl.count()).limit(1).collect()[0, 0]
+                self._operation_cache[cache_key] = total
+                return total
+
+            # Light sampling for larger collections
+            sample_size = min(5 if total_frames >= 100 else 3, total_frames)
+            # Evenly spaced indices across frames
+            step = max(1, total_frames // sample_size)
+            indices = list(range(0, total_frames, step))[:sample_size]
             sample_count = 0
-            
-            for idx in sample_indices:
+            for idx in indices:
                 lf = self._lazy_frames[idx]
-                count = lf.select(pl.count()).limit(1).collect()[0, 0]
-                sample_count += count
-            
-            # Statistical extrapolation
+                sample_count += lf.select(pl.count()).limit(1).collect()[0, 0]
+
             if sample_size > 0:
                 avg_rows = sample_count / sample_size
                 estimate = int(avg_rows * total_frames)
                 self._operation_cache[cache_key] = estimate
                 return estimate
             return 0
-            
+
         except Exception:
             # Conservative fallback estimate
             return len(self._lazy_frames) * 500_000 if self._lazy_frames else 0
@@ -924,41 +962,43 @@ class UnifiedLazyDataFrame(Generic[T]):
     
     def __getitem__(self, key):
         """
-        Column access that maintains compute graph integrity.
-        
-        Innovation: Returns LazyColumnAccessor, not actual data, maintaining
-        the lazy evaluation semantics throughout the operation chain.
+        Column access that maintains compute graph integrity with validation.
+
+        Returns LazyColumnAccessor or a new UnifiedLazyDataFrame; never materializes.
         """
-        # Track access pattern
-        self._access_patterns.append(AccessPattern(
-            column=key if isinstance(key, str) else None,
-            operation='getitem',
-            timestamp=time.time()
-        ))
-        
-        if isinstance(key, str):
-            # Single column access
-            return self._get_single_column(key)
-            
-        elif isinstance(key, list):
-            # Multi-column projection
-            return self._get_multiple_columns(key)
-            
-        elif isinstance(key, slice):
-            # Row slicing
-            return self._slice_rows(key)
-            
-        elif isinstance(key, tuple):
-            # Advanced indexing (rows, columns)
-            if len(key) == 2:
+        # Validate key type early for better errors
+        if not isinstance(key, (str, list, slice, tuple)):
+            raise TypeError(f"Invalid index type: {type(key).__name__}")
+
+        try:
+            if isinstance(key, str):
+                result = self._get_single_column(key)
+            elif isinstance(key, list):
+                result = self._get_multiple_columns(key)
+            elif isinstance(key, slice):
+                result = self._slice_rows(key)
+            else:  # tuple
+                if len(key) != 2:
+                    raise ValueError(f"Invalid indexing with {len(key)} dimensions")
                 row_selector, col_selector = key
-                result = self._slice_rows(row_selector) if row_selector is not None else self
-                return result[col_selector] if col_selector is not None else result
-            else:
-                raise ValueError(f"Invalid indexing with {len(key)} dimensions")
-                
-        else:
-            raise TypeError(f"Invalid index type: {type(key)}")
+                result_df = self._slice_rows(row_selector) if row_selector is not None else self
+                result = result_df[col_selector] if col_selector is not None else result_df
+
+            # Track successful access
+            self._access_patterns.append(AccessPattern(
+                column=key if isinstance(key, str) else None,
+                operation='getitem',
+                timestamp=time.time()
+            ))
+            return result
+        except Exception:
+            # Track failed access for diagnostics
+            self._access_patterns.append(AccessPattern(
+                column=key if isinstance(key, str) else None,
+                operation='getitem_failed',
+                timestamp=time.time()
+            ))
+            raise
     def _extract_columns_from_query(self, expr: str) -> List[str]:
         """
         Extract column names from a pandas-style query expression.
@@ -966,7 +1006,12 @@ class UnifiedLazyDataFrame(Generic[T]):
         Uses the existing AST infrastructure from pandas_to_polars_queries
         to accurately identify all column references in the query.
         """
+        # Simple per-instance cache to avoid repeated AST parsing
         try:
+            cache = self._query_columns_cache
+            if expr in cache:
+                return cache[expr]
+
             # Parse the expression using Python's AST module
             tree = ast.parse(expr, mode='eval')
             
@@ -994,9 +1039,12 @@ class UnifiedLazyDataFrame(Generic[T]):
             # Validate against schema if available
             if hasattr(self, '_schema') and self._schema:
                 valid_columns = [col for col in extractor.columns if col in self._schema]
+                cache[expr] = valid_columns
                 return valid_columns
-            
-            return list(extractor.columns)
+
+            result = list(extractor.columns)
+            cache[expr] = result
+            return result
             
         except Exception as e:
             # Fallback: return empty list rather than crashing
@@ -1013,7 +1061,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Create projection compute node
         project_node = GraphNode(
             op_type=ComputeOpType.PROJECT,
-            operation=lambda df: df.select(column) if hasattr(df, 'select') else df[column],
+            operation=lambda df, col=column: df.select(col) if hasattr(df, 'select') else df[col],
             inputs=[self._get_root_node()],
             metadata={'columns': [column], 'projection': 'single'}
         )
@@ -1029,7 +1077,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         else:
             # Fallback for other compute types
             project_compute = self._compute.transform(
-                lambda df: df.select(column) if hasattr(df, 'select') else df[column]
+                lambda df, col=column: df.select(col) if hasattr(df, 'select') else df[col]
             )
         
         return LazyColumnAccessor(
@@ -1051,7 +1099,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         slice_node = GraphNode(
             op_type=ComputeOpType.SLICE,
-            operation=lambda df: df[slice_obj],
+            operation=lambda df, s=slice_obj: df[s],
             inputs=[self._get_root_node()],
             metadata={'start': start, 'stop': stop, 'step': step}
         )
@@ -1068,34 +1116,35 @@ class UnifiedLazyDataFrame(Generic[T]):
     # Query and Transformation Methods (matching load_processes.py)
     # ========================================================================
     
-    def query(self, expr: str) -> 'UnifiedLazyDataFrame':
+    def query(self, expr: str, auto_generate_columns: bool = True) -> 'UnifiedLazyDataFrame':
         """Query with chain preservation."""
         required_cols = self._extract_columns_from_query(expr)
         missing_cols = [col for col in required_cols if col not in self.columns]
         
         if missing_cols:
-            # Attempt automatic resolution
-            if any('delta' in col or 'abs' in col for col in missing_cols):
-                print(f"🔧 Auto-generating kinematic columns for query...")
-                return self.createDeltaColumns().query(expr)
-            else:
-                raise KeyError(f"Query requires missing columns: {missing_cols}")
+            if auto_generate_columns and any('delta' in col or 'abs' in col for col in missing_cols):
+                # Single retry with auto-generation; disable thereafter to avoid loops
+                print("🔧 Auto-generating kinematic columns for query...")
+                return self.createDeltaColumns().query(expr, auto_generate_columns=False)
+            raise KeyError(f"Query requires missing columns: {missing_cols}")
+
+        sel = self._estimate_selectivity(expr)
         transform_meta = TransformationMetadata(
-            operation='dataframe_query',
-            parameters={'expr': expr}
+            operation='query',
+            parameters={'expr': expr, 'selectivity': sel}
         )
         
         polars_expr = self._convert_query_to_polars(expr)
         filter_node = GraphNode(
             op_type=ComputeOpType.FILTER,
-            operation=lambda df: df.filter(polars_expr),
+            operation=lambda df, pred=polars_expr: df.filter(pred),
             inputs=[self._get_root_node()],
-            metadata={'query': expr, 'estimated_selectivity': self._estimate_selectivity(expr)}
+            metadata={'expr': expr, 'estimated_selectivity': sel}
         )
         
         new_compute = self._create_compute_capability(
             filter_node, 
-            int(self._estimated_rows * self._estimate_selectivity(expr))
+            int(self._estimated_rows * sel)
         )
         
         return self._create_derived_dataframe(
@@ -1156,10 +1205,8 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Smart defaults for Belle II physics
         if group_cols is None:
-            # Try Belle II standard columns in priority order
             belle2_cols = ['__event__', '__run__', '__experiment__', '__production__']
             group_cols = [col for col in belle2_cols if col in self.columns]
-            
             if not group_cols:
                 raise ValueError("No valid grouping columns found. Specify group_cols explicitly.")
         
@@ -1170,24 +1217,15 @@ class UnifiedLazyDataFrame(Generic[T]):
         )
         
         def efficient_candidate_selection(df):
-            """Core selection logic using modern Polars techniques."""
-            
-            # Avoid materialization - use lazy operations only
+            """Schema-preserving selection using unique or window rank; lazy only."""
+            lf = df
             if sort_col == 'random':
-                # Random selection per group
-                return (df.group_by(group_cols, maintain_order=True)
-                        .agg(pl.all().shuffle(seed=42).first()))
-            
-            elif sort_col is None:
-                # Simple first per group
-                return (df.group_by(group_cols, maintain_order=True)
-                        .agg(pl.all().first()))
-            
-            else:
-                # Sort-based selection - most common case
-                return (df.sort(sort_col, descending=not ascending)
-                        .group_by(group_cols, maintain_order=True)
-                        .agg(pl.all().first()))
+                lf = lf.with_columns(pl.random(seed=42).alias('_rk')).sort('_rk').drop('_rk')
+                return lf.unique(subset=group_cols, keep='first')
+            if sort_col is None:
+                return lf.unique(subset=group_cols, keep='first')
+            rk = pl.col(sort_col).rank(method='ordinal', descending=not ascending).over(group_cols)
+            return lf.with_columns(rk.alias('_rk')).filter(pl.col('_rk') == 1).drop('_rk')
         
         # Create computation graph node
         selection_node = GraphNode(
@@ -1220,8 +1258,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         - Properly expands required_columns so new columns are retained
         - Optional schema validation for inputs
         """
-        import numpy as np
-        import polars as pl
+    # Use module-level numpy and polars imports
 
         # Validate required input columns (fail fast with clear error)
         required_inputs = [
@@ -1412,6 +1449,56 @@ class UnifiedLazyDataFrame(Generic[T]):
             Tuple of (counts, bin_edges) as numpy arrays
         """
         
+        # Phase 0
+        # Build minimal context and delegate selection/range via new helpers (no behavior change)
+        try:
+            system_avail_gb = psutil.virtual_memory().available / 1024**3
+        except Exception:
+            system_avail_gb = self.memory_budget_gb
+        memory_pressure = system_avail_gb < self.memory_budget_gb * 0.3
+        num_frames = len(self._lazy_frames) if hasattr(self, '_lazy_frames') and self._lazy_frames else 0
+        dtype_str = None
+        try:
+            if hasattr(self, '_schema') and self._schema and column in self._schema:
+                dtype_str = str(self._schema[column])
+        except Exception:
+            pass
+        from .histogram.core_types import HistogramContext
+        from .histogram.selector import StrategySelector
+        from .histogram.range_estimator import RangeEstimator
+        ctx = HistogramContext(
+            df_ref=weakref.ref(self),
+            column=column,
+            bins=bins,
+            range=range,
+            density=density,
+            weights=weights,
+            estimated_rows=getattr(self, '_estimated_rows', 0),
+            num_frames=num_frames,
+            memory_budget_gb=self.memory_budget_gb,
+            system_available_gb=system_avail_gb,
+            memory_pressure=memory_pressure,
+            dtype_str=dtype_str,
+            schema_size=len(self._schema) if hasattr(self, '_schema') and self._schema else 0,
+            debug=debug,
+        )
+        selector = StrategySelector(self)
+        decision = selector.choose(ctx, force_strategy)
+        chosen_strategy = decision.strategy
+        if range is None:
+            computed_range = RangeEstimator(self).determine(ctx, chosen_strategy)
+        else:
+            computed_range = range
+        if debug and getattr(decision, 'rationale', ''):
+            print(f"🔎 Strategy rationale: {decision.rationale}")
+        # Phase 4: Capture rationale for observability
+        try:
+            metrics_rationale = getattr(decision, 'rationale', '')
+            if metrics_rationale:
+                setattr(self, '_last_hist_rationale', metrics_rationale)
+        except Exception:
+            pass
+
         # MASTER ENHANCEMENT: Debug mode support
         if debug:
             return self._debug_hist_execution(column, bins, range, density, weights, **kwargs)
@@ -1429,14 +1516,37 @@ class UnifiedLazyDataFrame(Generic[T]):
         )
         
         start_time = time.time()
+        # Phase 4: Observability inputs (non-breaking via kwargs)
+        time_budget_s = kwargs.get('time_budget_s')
+        progress_cb = kwargs.get('progress_callback')
+        metrics_cb = kwargs.get('metrics_callback')
+        # Propagate to executors via instance fields (cleared in finally)
+        had_time_budget = False
+        had_progress_cb = False
+        had_metrics_cb = False
+        if time_budget_s is not None:
+            setattr(self, '_hist_time_budget_s', float(time_budget_s))
+            had_time_budget = True
+        if callable(progress_cb):
+            setattr(self, '_hist_progress_cb', progress_cb)
+            had_progress_cb = True
+        if callable(metrics_cb):
+            setattr(self, '_hist_metrics_cb', metrics_cb)
+            had_metrics_cb = True
+        # Reset any stale early-exit flag
+        try:
+            if hasattr(self, '_hist_early_exit'):
+                delattr(self, '_hist_early_exit')
+        except Exception:
+            pass
         
         # Phase 1: Strategy Selection (ENHANCED)
         # ========================================
         if force_strategy:
             strategy = force_strategy
         else:
-            # OPTIMAL: Combine HEAD's comprehensive selection with MASTER's simplifications
-            strategy = self._select_optimal_histogram_strategy_merged(column, bins, weights)
+            # Phase 0: use delegated decision to maintain behavior with clearer separation
+            strategy = chosen_strategy
         
         metrics.strategy = strategy
         print(f"📊 Histogram computation for '{column}' using {strategy.name} strategy")
@@ -1444,78 +1554,56 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Phase 2: Range Determination (MERGED)
         # ======================================
         if range is None:
-            # Use merged range computation combining both approaches
-            range = self._compute_optimal_range(column, strategy)
+            # Phase 0: use delegated computation (identical result expected)
+            range = computed_range
         
         # Phase 3: Execute with Selected Strategy (HEAD FRAMEWORK)
         # =========================================================
         try:
+            from .histogram.executors import get_executor
             with memory_monitor() as get_memory_usage:
-                if strategy == HistogramExecutionStrategy.CPP_ACCELERATED:
-                    result = self._execute_cpp_accelerated_histogram(
-                        column, bins, range, density, weights, metrics
-                    )
-                elif strategy == HistogramExecutionStrategy.BILLION_ROW_ENGINE:
-                    result = self._execute_billion_row_histogram(
-                        column, bins, range, density, weights, metrics
-                    )
-                elif strategy == HistogramExecutionStrategy.ADAPTIVE_CHUNKED:
-                    # NEW: Use MASTER's adaptive optimization
-                    result = self._execute_adaptive_chunked_histogram(
-                        column, bins, range, density, weights, metrics
-                    )
-                elif strategy == HistogramExecutionStrategy.LAZY_CHUNKED:
-                    result = self._execute_lazy_chunked_histogram(
-                        column, bins, range, density, weights, metrics
-                    )
-                elif strategy == HistogramExecutionStrategy.MEMORY_CONSTRAINED:
-                    result = self._execute_memory_constrained_histogram(
-                        column, bins, range, density, weights, metrics
-                    )
-                else:
-                    result = self._execute_fallback_histogram(
-                        column, bins, range, density, weights, metrics
-                    )
-                
-                # Record memory usage (clamp to >= 0)
-                mem_delta = get_memory_usage()
+                executor = get_executor(self, strategy)
+                result = executor.execute(ctx, range, metrics)
+
+                # Record memory usage; use -1 sentinel when unknown
+                mem_delta = None
                 try:
-                    metrics.memory_peak_mb = float(mem_delta) if mem_delta and mem_delta > 0 else 0.0
+                    mem_delta = get_memory_usage()
                 except Exception:
-                    metrics.memory_peak_mb = 0.0
-                
+                    mem_delta = None
+                try:
+                    if mem_delta is None:
+                        metrics.memory_peak_mb = -1.0
+                    else:
+                        metrics.memory_peak_mb = max(0.0, float(mem_delta))
+                except Exception:
+                    metrics.memory_peak_mb = -1.0
+
         except Exception as primary_error:
             # HEAD: Graceful degradation with cascade
             print(f"   ⚠️ {strategy.name} failed: {str(primary_error)}, attempting fallback")
             metrics.errors_recovered += 1
-            
+
             fallback_strategies = [
                 HistogramExecutionStrategy.MEMORY_CONSTRAINED,
-                HistogramExecutionStrategy.FALLBACK_BASIC
+                HistogramExecutionStrategy.FALLBACK_BASIC,
             ]
-            
+
+            from .histogram.executors import get_executor
             for fallback in fallback_strategies:
                 try:
                     print(f"   🔄 Attempting {fallback.name} strategy")
                     metrics.strategy = fallback
-                    
-                    if fallback == HistogramExecutionStrategy.MEMORY_CONSTRAINED:
-                        result = self._execute_memory_constrained_histogram(
-                            column, bins, range, density, weights, metrics
-                        )
-                    else:
-                        result = self._execute_fallback_histogram(
-                            column, bins, range, density, weights, metrics
-                        )
+                    executor = get_executor(self, fallback)
+                    result = executor.execute(ctx, range, metrics)
                     break
-                    
                 except Exception as fallback_error:
                     print(f"   ❌ {fallback.name} also failed: {str(fallback_error)}")
                     metrics.errors_recovered += 1
                     continue
             else:
                 # All strategies failed - return empty histogram
-                print(f"   ❌ All strategies failed, returning empty histogram")
+                print("   ❌ All strategies failed, returning empty histogram")
                 result = (np.zeros(bins, dtype=np.float64), np.linspace(0, 1, bins + 1))
         
         # Phase 4: Finalization and Metrics
@@ -1524,8 +1612,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         # Sanity clamps
         if metrics.processed_rows > metrics.total_rows > 0:
             metrics.processed_rows = metrics.total_rows
-        if metrics.memory_peak_mb < 0:
-            metrics.memory_peak_mb = 0.0
+        # Preserve negative sentinel (-1) to indicate unknown memory peak
         
         # Log performance metrics
         self._log_histogram_performance(metrics)
@@ -1536,8 +1623,57 @@ class UnifiedLazyDataFrame(Generic[T]):
         # MASTER: Record chunking performance if adaptive was used
         if strategy == HistogramExecutionStrategy.ADAPTIVE_CHUNKED and metrics.chunk_size_used > 0:
             self.record_chunking_performance(metrics.chunk_size_used, metrics.execution_time)
-        
+
+        # Persist compact snapshot for observability and diagnostics
+        try:
+            self._last_hist_metrics = {
+                'strategy': metrics.strategy.name,
+                'processed_rows': int(metrics.processed_rows),
+                'total_rows': int(metrics.total_rows),
+                'efficiency': float(metrics.efficiency),
+                'throughput_mps': float(metrics.throughput_mps),
+                'memory_peak_mb': float(getattr(metrics, 'memory_peak_mb', -1.0) if getattr(metrics, 'memory_peak_mb', None) is not None else -1.0),
+                'chunks_processed': int(metrics.chunks_processed),
+                'chunk_size': int(metrics.chunk_size_used),
+                'errors_recovered': int(metrics.errors_recovered),
+                'elapsed_s': float(metrics.execution_time),
+                # Phase 4: extras
+                'time_budget_s': float(time_budget_s) if time_budget_s is not None else None,
+                'early_exit': bool(getattr(self, '_hist_early_exit', False)),
+                'decision_confidence': float(getattr(decision, 'confidence', 0.0)),
+            }
+            # Optional metrics callback
+            try:
+                cb = getattr(self, '_hist_metrics_cb', None)
+                if callable(cb):
+                    payload = dict(self._last_hist_metrics)
+                    payload['rationale'] = getattr(self, '_last_hist_rationale', '')
+                    cb(payload)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Cleanup transient observability attributes
+        try:
+            if had_time_budget and hasattr(self, '_hist_time_budget_s'):
+                delattr(self, '_hist_time_budget_s')
+            if had_progress_cb and hasattr(self, '_hist_progress_cb'):
+                delattr(self, '_hist_progress_cb')
+            if had_metrics_cb and hasattr(self, '_hist_metrics_cb'):
+                delattr(self, '_hist_metrics_cb')
+            if hasattr(self, '_hist_early_exit'):
+                delattr(self, '_hist_early_exit')
+        except Exception:
+            pass
+
         return result
+        
+    # Ensure cleanup (defensive; will not run due to return above, but kept for clarity)
+    # if had_time_budget and hasattr(self, '_hist_time_budget_s'):
+    #     delattr(self, '_hist_time_budget_s')
+    # if had_progress_cb and hasattr(self, '_hist_progress_cb'):
+    #     delattr(self, '_hist_progress_cb')
     
     # ============================================================================
     # MERGED: Strategy Selection combining HEAD's comprehensive approach with MASTER's optimizations
@@ -1680,43 +1816,75 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         metrics.chunk_size_used = chunk_size
         print(f"   🎯 Adaptive chunk size: {chunk_size:,} rows")
-        
+
         # Initialize histogram
-        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        bin_edges = self._compute_bin_edges(range, bins)
         accumulator = np.zeros(bins, dtype=np.float64)
         
         # Get lazy frames
         lazy_frames = self._extract_lazy_frames_safely()
         
-        # Process with adaptive chunking (using MASTER's streaming approach)
+        # Process with adaptive chunking (Phase 3: smarter execution with feedback + memory throttling)
         for frame_idx, lazy_frame in enumerate(lazy_frames):
-            # Use MASTER's streaming approach
-            frame_contribution = self._process_frame_streaming(
-                lazy_frame, column, bin_edges, chunk_size, weights
-            )
-            
-            accumulator += frame_contribution
-            # Count of entries contributing to histogram as proxy for processed rows
+            # Phase 4: Observability — early exit and progress callback
             try:
-                metrics.processed_rows += int(np.asarray(frame_contribution).sum())
+                tb = getattr(self, '_hist_time_budget_s', None)
+                if tb is not None and (time.time() - start_time) > tb:
+                    print("   ⏱️ Time budget reached; early exit from adaptive loop")
+                    try:
+                        setattr(self, '_hist_early_exit', True)
+                    except Exception:
+                        pass
+                    break
             except Exception:
                 pass
+
+            # Use enhanced streaming that returns stats for feedback
+            frame_contribution, rows_processed, frame_elapsed, last_chunk_used = (
+                self._process_frame_streaming_stats(
+                    lazy_frame, column, bin_edges, chunk_size, weights
+                )
+            )
+
+            accumulator += frame_contribution
+            metrics.processed_rows += int(rows_processed)
             metrics.chunks_processed += 1
-            
-            # Adaptive adjustment after first frame
+
+            # Progress callback
+            try:
+                pcb = getattr(self, '_hist_progress_cb', None)
+                if callable(pcb):
+                    pcb(
+                        processed_rows=metrics.processed_rows,
+                        chunks=metrics.chunks_processed,
+                        chunk_size=metrics.chunk_size_used,
+                        elapsed=time.time() - start_time,
+                    )
+            except Exception:
+                pass
+
+            # Adaptive adjustment after first frame for subsequent frames
             if frame_idx == 0 and len(lazy_frames) > 1:
                 # Record performance for learning
-                elapsed = time.time() - start_time
-                if elapsed > 0:
-                    throughput = metrics.processed_rows / elapsed
-                    ChunkingEnhancement.get_optimizer(self.memory_budget_gb).record_performance(
-                        chunk_size, throughput
-                    )
+                if frame_elapsed and frame_elapsed > 0:
+                    throughput = rows_processed / frame_elapsed
+                    try:
+                        ChunkingEnhancement.get_optimizer(self.memory_budget_gb).record_performance(
+                            last_chunk_used, throughput
+                        )
+                    except Exception:
+                        pass
+                    # Adjust chunk size towards target latency
+                    try:
+                        chunk_size = self._adjust_chunk_size_based_on_performance(
+                            max(1, int(last_chunk_used)), max(1, int(rows_processed)), float(frame_elapsed)
+                        )
+                        metrics.chunk_size_used = chunk_size
+                    except Exception:
+                        pass
         
         # Apply density normalization
-        if density and metrics.processed_rows > 0:
-            bin_width = bin_edges[1] - bin_edges[0]
-            accumulator = accumulator / (metrics.processed_rows * bin_width)
+        accumulator = self._apply_density_normalization(accumulator, bin_edges, density, metrics.processed_rows)
         
         return accumulator, bin_edges
     
@@ -1893,7 +2061,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         if range is None:
             range = self._compute_intelligent_range(column, lazy_frames)
         
-        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        bin_edges = self._compute_bin_edges(range, bins)
         accumulator = np.zeros(bins, dtype=np.int64)
         
         # Process provided frames
@@ -1918,50 +2086,69 @@ class UnifiedLazyDataFrame(Generic[T]):
     # ============================================================================
     def _process_frame_streaming(self, lazy_frame, column: str, bin_edges: np.ndarray, 
                                 chunk_size: int, weights: Optional[str]) -> np.ndarray:
-        """MASTER: Schema-aware streaming with robust validation and true chunking."""
+        """Thin wrapper over stats-enabled streaming to avoid duplication."""
+        acc, _rows, _elapsed, _last_chunk = self._process_frame_streaming_stats(
+            lazy_frame, column, bin_edges, chunk_size, weights
+        )
+        return acc
+
+    def _process_frame_streaming_stats(self, lazy_frame, column: str, bin_edges: np.ndarray,
+                                       chunk_size: int, weights: Optional[str]) -> Tuple[np.ndarray, int, float, int]:
+        """Phase 3: Streaming with row-count and memory-aware throttling.
+
+        Returns (counts, rows_processed, elapsed_seconds, last_chunk_size_used).
+        Keeps behavior of _process_frame_streaming but additionally tracks true row counts
+        and adjusts chunk size down under memory pressure to avoid OOM.
+        """
+        t0 = time.time()
+        rows_accum = 0
+        last_chunk_used = max(1, int(chunk_size))
+
         try:
-            # Validate schema before selection
+            # Validate schema and build projection like the original helper
             frame_schema = lazy_frame.collect_schema()
             available_columns = set(frame_schema.names())
 
-            # Build validated selection list
-            validated_columns = []
-
+            cols = []
             if column not in available_columns:
                 raise KeyError(
-                    f"Histogram column '{column}' missing from schema. "
-                    f"Available: {sorted(available_columns)}"
+                    f"Histogram column '{column}' missing from schema. Available: {sorted(available_columns)}"
                 )
-            validated_columns.append(column)
+            cols.append(column)
 
             if weights and weights in available_columns:
-                validated_columns.append(weights)
-            elif weights:
-                warnings.warn(f"Weight column '{weights}' not found - proceeding unweighted")
+                cols.append(weights)
+            else:
                 weights = None
 
-            # Schema-safe projection
-            projected_frame = lazy_frame.select(validated_columns)
+            projected_frame = lazy_frame.select(cols)
 
-            # Count rows once, then process in chunks to avoid materializing the entire frame
+            # Determine total rows conservatively
             try:
-                total_rows = projected_frame.select(pl.count()).collect()[0, 0]
+                total_rows = int(projected_frame.select(pl.count()).collect()[0, 0])
             except Exception:
-                # Fallback: try a small collect to infer rows
-                df_tmp = projected_frame.head(1_000).collect()
+                df_tmp = projected_frame.head(min(1_000, last_chunk_used)).collect()
                 total_rows = len(df_tmp)
-                if total_rows == 1_000:
-                    # Best effort estimate if we hit the head cap
-                    total_rows = max(total_rows, chunk_size)
+                if total_rows > 0:
+                    total_rows = max(total_rows, last_chunk_used)
 
-            # Accumulator for this frame
             frame_acc = np.zeros(len(bin_edges) - 1, dtype=np.int64)
             if total_rows <= 0:
-                return frame_acc
+                return frame_acc, 0, time.time() - t0, last_chunk_used
 
-            for offset in builtins.range(0, int(total_rows), int(max(1, chunk_size))):
+            current_chunk = last_chunk_used
+            # Loop with memory-aware throttling
+            for offset in builtins.range(0, total_rows, max(1, int(current_chunk))):
+                # Check memory pressure and throttle if needed
                 try:
-                    chunk = projected_frame.slice(offset, chunk_size).collect()
+                    avail_gb = psutil.virtual_memory().available / 1024**3
+                    if avail_gb < self.memory_budget_gb * 0.2:
+                        current_chunk = max(10_000, current_chunk // 2)
+                except Exception:
+                    pass
+
+                try:
+                    chunk = projected_frame.slice(offset, current_chunk).collect()
                     if len(chunk) == 0:
                         continue
                     values = chunk[column].to_numpy()
@@ -1974,51 +2161,22 @@ class UnifiedLazyDataFrame(Generic[T]):
                     values = values[valid_mask]
                     if len(values) == 0:
                         continue
-                    counts, _ = np.histogram(values, bins=bin_edges, weights=weight_values)
+                    # Count rows processed precisely (pre-weighting)
+                    rows_accum += int(values.shape[0])
+                    counts, _ = np.histogram(values.astype(np.float64), bins=bin_edges, weights=weight_values)
                     frame_acc += counts
+                    last_chunk_used = current_chunk
                 except Exception as chunk_err:
                     warnings.warn(f"Chunk failed at offset {offset}: {chunk_err}")
                     continue
 
-            return frame_acc
+            return frame_acc, rows_accum, time.time() - t0, last_chunk_used
 
         except Exception as e:
-            warnings.warn(f"Frame streaming validation failed: {e}")
-            return np.zeros(len(bin_edges) - 1, dtype=np.int64)
+            warnings.warn(f"Frame streaming (stats) validation failed: {e}")
+            return np.zeros(len(bin_edges) - 1, dtype=np.int64), 0, time.time() - t0, last_chunk_used
     
-    def _execute_streaming_histogram(self, projected_frame, column, bin_edges, weights):
-        """Helper for streaming histogram execution."""
-        try:
-            # Collect with streaming if possible
-            try:
-                df = projected_frame.collect(streaming=True)
-            except:
-                df = projected_frame.collect()
-            
-            if len(df) == 0:
-                return np.zeros(len(bin_edges) - 1, dtype=np.int64)
-            
-            # Compute histogram
-            values = df[column].to_numpy()
-            weight_values = df[weights].to_numpy() if weights else None
-            
-            # Filter valid values
-            valid_mask = np.isfinite(values)
-            if weights:
-                valid_mask &= np.isfinite(weight_values)
-                weight_values = weight_values[valid_mask]
-            
-            values = values[valid_mask]
-            
-            if len(values) > 0:
-                counts, _ = np.histogram(values, bins=bin_edges, weights=weight_values)
-                return counts
-            
-            return np.zeros(len(bin_edges) - 1, dtype=np.int64)
-            
-        except Exception as e:
-            warnings.warn(f"Streaming histogram failed: {e}")
-            return np.zeros(len(bin_edges) - 1, dtype=np.int64)
+    # Removed unused _execute_streaming_histogram to reduce code size.
     
     def _calculate_optimal_histogram_chunk_size(self) -> int:
         """
@@ -2148,6 +2306,28 @@ class UnifiedLazyDataFrame(Generic[T]):
             return int(self._estimated_rows * 0.8)
         else:
             return int(self._estimated_rows * 0.1)
+
+    # Small shared helpers to reduce duplication in histogram code
+    def _compute_bin_edges(self, range: Tuple[float, float], bins: int) -> np.ndarray:
+        try:
+            return np.linspace(range[0], range[1], int(bins) + 1)
+        except Exception:
+            # Safe fallback to 0..1 if inputs are bad
+            b = max(1, int(bins) if isinstance(bins, int) else 50)
+            return np.linspace(0.0, 1.0, b + 1)
+
+    def _apply_density_normalization(self, counts: np.ndarray, bin_edges: np.ndarray,
+                                     density: bool, processed_rows: int) -> np.ndarray:
+        if not density:
+            return counts
+        try:
+            if processed_rows and processed_rows > 0:
+                width = float(bin_edges[1] - bin_edges[0])
+                if width > 0:
+                    return counts / (processed_rows * width)
+        except Exception:
+            pass
+        return counts
 #     # ============================================================================
 #     # EXECUTION STRATEGIES
 #     # ============================================================================
@@ -2215,7 +2395,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         )
         
         # Initialize accumulator
-        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        bin_edges = self._compute_bin_edges(range, bins)
         accumulator = np.zeros(bins, dtype=np.float64)
         
         # Process with billion-row engine's sophisticated chunking
@@ -2233,9 +2413,7 @@ class UnifiedLazyDataFrame(Generic[T]):
             metrics.chunks_processed += 1
         
         # Apply density normalization
-        if density and metrics.processed_rows > 0:
-            bin_width = bin_edges[1] - bin_edges[0]
-            accumulator = accumulator / (metrics.processed_rows * bin_width)
+        accumulator = self._apply_density_normalization(accumulator, bin_edges, density, metrics.processed_rows)
         
         metrics.processed_rows = self._estimated_rows
         
@@ -2251,7 +2429,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         metrics.chunk_size_used = chunk_size
         
         # Initialize histogram
-        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        bin_edges = self._compute_bin_edges(range, bins)
         accumulator = np.zeros(bins, dtype=np.float64)
         
         # Timing for adaptive feedback
@@ -2261,6 +2439,19 @@ class UnifiedLazyDataFrame(Generic[T]):
         
         # Process each frame with adaptive chunking
         for frame_idx, lazy_frame in enumerate(lazy_frames):
+            # Observability: respect time budget
+            try:
+                tb = getattr(self, '_hist_time_budget_s', None)
+                if tb is not None and (time.time() - start_time) > tb:
+                    print("   ⏱️ Time budget reached; early exit from lazy-chunked loop")
+                    try:
+                        setattr(self, '_hist_early_exit', True)
+                    except Exception:
+                        pass
+                    break
+            except Exception:
+                pass
+
             frame_contribution, rows_processed = self._process_frame_chunked(
                 lazy_frame, column, bin_edges, chunk_size, weights
             )
@@ -2269,6 +2460,19 @@ class UnifiedLazyDataFrame(Generic[T]):
             metrics.processed_rows += rows_processed
             metrics.chunks_processed += 1
             
+            # Progress callback
+            try:
+                pcb = getattr(self, '_hist_progress_cb', None)
+                if callable(pcb):
+                    pcb(
+                        processed_rows=metrics.processed_rows,
+                        chunks=metrics.chunks_processed,
+                        chunk_size=metrics.chunk_size_used,
+                        elapsed=time.time() - start_time,
+                    )
+            except Exception:
+                pass
+
             # Adaptive chunk size adjustment based on performance
             if frame_idx == 0 and len(lazy_frames) > 1:
                 # Measure first frame performance and adjust
@@ -2278,9 +2482,7 @@ class UnifiedLazyDataFrame(Generic[T]):
                 metrics.chunk_size_used = chunk_size
         
         # Apply density normalization
-        if density and metrics.processed_rows > 0:
-            bin_width = bin_edges[1] - bin_edges[0]
-            accumulator = accumulator / (metrics.processed_rows * bin_width)
+        accumulator = self._apply_density_normalization(accumulator, bin_edges, density, metrics.processed_rows)
         
         return accumulator, bin_edges
 
@@ -2311,12 +2513,15 @@ class UnifiedLazyDataFrame(Generic[T]):
                                             metrics: HistogramMetrics) -> Tuple[np.ndarray, np.ndarray]:
         """Ultra-conservative execution for memory-constrained environments."""
         
+        # For observability support
+        start_time = time.time()
+
         # Use very small chunks
         chunk_size = min(10_000, self._estimated_rows // 100)
         metrics.chunk_size_used = chunk_size
         
         # Initialize histogram
-        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        bin_edges = self._compute_bin_edges(range, bins)
         accumulator = np.zeros(bins, dtype=np.float64)
         
         # Process with aggressive memory management
@@ -2332,6 +2537,18 @@ class UnifiedLazyDataFrame(Generic[T]):
                 total_rows = projected.select(pl.count()).collect()[0, 0]
                 
                 for offset in builtins.range(0, total_rows, chunk_size):
+                    # Observability: respect time budget
+                    try:
+                        tb = getattr(self, '_hist_time_budget_s', None)
+                        if tb is not None and (time.time() - start_time) > tb:
+                            print("   ⏱️ Time budget reached; early exit from memory-constrained loop")
+                            try:
+                                setattr(self, '_hist_early_exit', True)
+                            except Exception:
+                                pass
+                            break
+                    except Exception:
+                        pass
                     # Explicit garbage collection before each chunk
                     import gc
                     gc.collect()
@@ -2360,6 +2577,18 @@ class UnifiedLazyDataFrame(Generic[T]):
                     del chunk
                     
                 metrics.chunks_processed += 1
+                # Progress callback per frame
+                try:
+                    pcb = getattr(self, '_hist_progress_cb', None)
+                    if callable(pcb):
+                        pcb(
+                            processed_rows=metrics.processed_rows,
+                            chunks=metrics.chunks_processed,
+                            chunk_size=metrics.chunk_size_used,
+                            elapsed=time.time() - start_time,
+                        )
+                except Exception:
+                    pass
                 
             except Exception as e:
                 print(f"   ⚠️ Frame processing failed in memory-constrained mode: {e}")
@@ -2367,9 +2596,7 @@ class UnifiedLazyDataFrame(Generic[T]):
                 continue
         
         # Apply density normalization
-        if density and metrics.processed_rows > 0:
-            bin_width = bin_edges[1] - bin_edges[0]
-            accumulator = accumulator / (metrics.processed_rows * bin_width)
+        accumulator = self._apply_density_normalization(accumulator, bin_edges, density, metrics.processed_rows)
         
         return accumulator, bin_edges
     
@@ -2379,7 +2606,7 @@ class UnifiedLazyDataFrame(Generic[T]):
         """Basic fallback implementation - always works but may be slow."""
         
         # Initialize histogram
-        bin_edges = np.linspace(range[0], range[1], bins + 1)
+        bin_edges = self._compute_bin_edges(range, bins)
         accumulator = np.zeros(bins, dtype=np.float64)
         
         try:
@@ -2404,9 +2631,7 @@ class UnifiedLazyDataFrame(Generic[T]):
                         metrics.processed_rows = len(values)
                         
                         # Apply density
-                        if density:
-                            bin_width = bin_edges[1] - bin_edges[0]
-                            accumulator = accumulator / (len(values) * bin_width)
+                        accumulator = self._apply_density_normalization(accumulator, bin_edges, density, len(values))
             
         except Exception as e:
             print(f"   ❌ Fallback histogram failed: {e}")
@@ -2421,54 +2646,12 @@ class UnifiedLazyDataFrame(Generic[T]):
     def _process_frame_chunked(self, lazy_frame: pl.LazyFrame, column: str,
                              bin_edges: np.ndarray, chunk_size: int,
                              weights: Optional[str]) -> Tuple[np.ndarray, int]:
-        """Process a single frame in chunks with error recovery (true lazy slicing)."""
-        frame_accumulator = np.zeros(len(bin_edges) - 1, dtype=np.float64)
-        total_processed = 0
-
-        try:
-            # Project only needed columns for memory efficiency
-            cols_needed = [column] if not weights else [column, weights]
-            projected = lazy_frame.select(cols_needed)
-
-            # Count once to avoid collecting whole frame
-            try:
-                total_rows = int(projected.select(pl.count()).collect()[0, 0])
-            except Exception:
-                total_rows = chunk_size
-
-            if total_rows <= 0:
-                return frame_accumulator, 0
-
-            for start_idx in builtins.range(0, total_rows, max(1, int(chunk_size))):
-                try:
-                    chunk = projected.slice(start_idx, min(chunk_size, total_rows - start_idx)).collect()
-                    if len(chunk) == 0:
-                        continue
-                    values = chunk[column].to_numpy()
-                    weight_values = chunk[weights].to_numpy() if weights else None
-
-                    # Filter valid values
-                    valid_mask = np.isfinite(values)
-                    if weights:
-                        valid_mask &= np.isfinite(weight_values)
-                        weight_values = weight_values[valid_mask]
-
-                    values = values[valid_mask]
-
-                    # Compute histogram
-                    if len(values) > 0:
-                        chunk_counts, _ = np.histogram(values, bins=bin_edges, weights=weight_values)
-                        frame_accumulator += chunk_counts
-                        total_processed += len(values)
-
-                except Exception as chunk_error:
-                    print(f"      ⚠️ Chunk processing error: {chunk_error}, skipping chunk")
-                    continue
-
-        except Exception as frame_error:
-            print(f"   ⚠️ Frame processing error: {frame_error}")
-
-        return frame_accumulator, total_processed
+        """Route through stats-enabled streaming to avoid duplicate logic."""
+        acc, rows, _elapsed, _last = self._process_frame_streaming_stats(
+            lazy_frame, column, bin_edges, chunk_size, weights
+        )
+        # Cast to float accumulator to match previous dtype
+        return acc.astype(np.float64, copy=False), int(rows)
     
     def _extract_lazy_frames_safely(self) -> List[pl.LazyFrame]:
         """Safely extract lazy frames with multiple fallback strategies."""
@@ -2566,17 +2749,23 @@ class UnifiedLazyDataFrame(Generic[T]):
     
     def _log_histogram_performance(self, metrics: HistogramMetrics):
         """Log comprehensive performance metrics."""
-        
-        print(f"\n📊 Histogram Performance Summary:")
+        print("\n📊 Histogram Performance Summary:")
         print(f"   Strategy: {metrics.strategy.name}")
-        print(f"   Rows: {metrics.processed_rows:,} / {metrics.total_rows:,} "
-              f"({metrics.efficiency:.1%} efficiency)")
-        print(f"   Time: {metrics.execution_time:.2f}s "
-              f"({metrics.throughput_mps:.1f}M rows/s)")
-        print(f"   Memory Peak: {metrics.memory_peak_mb:.1f}MB")
-        print(f"   Chunks: {metrics.chunks_processed} "
-              f"(size: {metrics.chunk_size_used:,})")
-        
+        print(
+            f"   Rows: {metrics.processed_rows:,} / {metrics.total_rows:,} "
+            f"({metrics.efficiency:.1%} efficiency)"
+        )
+        print(
+            f"   Time: {metrics.execution_time:.2f}s "
+            f"({metrics.throughput_mps:.1f}M rows/s)"
+        )
+        mem_val = getattr(metrics, 'memory_peak_mb', None)
+        mem_str = "unknown" if (mem_val is None or mem_val < 0) else f"{mem_val:.1f}MB"
+        print(f"   Memory Peak: {mem_str}")
+        print(
+            f"   Chunks: {metrics.chunks_processed} "
+            f"(size: {metrics.chunk_size_used:,})"
+        )
         if metrics.errors_recovered > 0:
             print(f"   Errors Recovered: {metrics.errors_recovered}")
     
@@ -2803,6 +2992,22 @@ class UnifiedLazyDataFrame(Generic[T]):
             'access_patterns': len(self._access_patterns),
             'cache_size': len(self._operation_cache),
             'memory_budget_gb': self.memory_budget_gb
+        }
+
+    # ========================================================================
+    # Phase 4: Lightweight observability accessors
+    # ========================================================================
+    def last_hist_info(self) -> Dict[str, Any]:
+        """Return last histogram's rationale and metrics if available.
+
+    Fields: rationale (str), and metrics snapshot with keys:
+    strategy, processed_rows, total_rows, efficiency, throughput_mps,
+    memory_peak_mb, chunks_processed, chunk_size, errors_recovered, elapsed_s,
+    time_budget_s, early_exit, decision_confidence.
+        """
+        return {
+            'rationale': getattr(self, '_last_hist_rationale', ''),
+            'metrics': getattr(self, '_last_hist_metrics', None),
         }
 
 _original_create_derived_dataframe = UnifiedLazyDataFrame._create_derived_dataframe

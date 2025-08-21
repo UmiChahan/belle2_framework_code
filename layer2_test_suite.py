@@ -34,6 +34,7 @@ from hypothesis.extra.numpy import arrays
 from layer2_unified_lazy_dataframe import (
     UnifiedLazyDataFrame, LazyColumnAccessor
 )
+from layer2_unified_lazy_dataframe.histogram_strategies import HistogramExecutionStrategy
 from layer2_optimized_ultra_lazy_dict import (
     OptimizedUltraLazyDict, LazyGroupProxy, BroadcastResult,
     ProcessMetadata, create_process_dict_from_directory
@@ -920,6 +921,72 @@ class TestIntegration:
         # Step 5: Performance analysis
         profile = framework.profile_performance()
         assert profile['framework_stats']['operations_executed'] > 0
+
+
+# ============================================================================
+# Additional Tests: Histogram Observability & Early Exit
+# ============================================================================
+
+class TestHistogramObservability:
+    def test_hist_observability_confidence_and_rationale(self):
+        """Ensure selector confidence surfaces in rationale and last metrics."""
+        df = UnifiedLazyDataFrame(
+            lazy_frames=[pl.DataFrame({'x': np.random.randn(10000)}).lazy()]
+        )
+        # Force a known strategy to reduce environmental variance
+        counts, edges = df.hist(
+            'x', bins=32, force_strategy=HistogramExecutionStrategy.LAZY_CHUNKED
+        )
+        assert len(counts) == 32 and len(edges) == 33
+        info = df.last_hist_info()
+        assert isinstance(info, dict)
+        # Rationale present
+        assert isinstance(info.get('rationale', ''), str)
+        # Metrics available and include decision_confidence in [0,1]
+        metrics = info.get('metrics')
+        assert isinstance(metrics, dict)
+        conf = metrics.get('decision_confidence')
+        assert conf is not None and 0.0 <= float(conf) <= 1.0
+
+    def test_hist_time_budget_early_exit_and_metrics_callback(self):
+        """Time budget should trigger early exit; metrics callback receives snapshot."""
+        # Two frames so that time budget check on the second frame can trigger early-exit
+        df = UnifiedLazyDataFrame(
+            lazy_frames=[
+                pl.DataFrame({'x': np.random.randn(200000)}).lazy(),
+                pl.DataFrame({'x': np.random.randn(200000)}).lazy(),
+            ]
+        )
+
+        # Fake streaming that burns time and reports progress
+        def fake_streaming_stats(lazy_frame, column, bin_edges, chunk_size, weights):
+            import time as _t
+            _t.sleep(0.2)  # simulate work
+            # Contribute zeros; report processed_rows and timings
+            return np.zeros(len(bin_edges) - 1, dtype=np.float64), int(50_000), 0.2, int(chunk_size)
+
+        called = {'count': 0, 'payload': None}
+        def metrics_cb(snapshot: dict):
+            called['count'] += 1
+            called['payload'] = snapshot
+
+        # Patch the stats-enabled streaming helper
+        with patch.object(UnifiedLazyDataFrame, '_process_frame_streaming_stats', side_effect=fake_streaming_stats):
+            df.hist(
+                'x', bins=64,
+                force_strategy=HistogramExecutionStrategy.ADAPTIVE_CHUNKED,
+                time_budget_s=0.05,
+                metrics_callback=metrics_cb,
+            )
+
+        info = df.last_hist_info()
+        metrics = info.get('metrics') or {}
+        # Early exit should be True when time budget hit
+        assert metrics.get('early_exit') is True
+        # Callback should have been invoked with a dict payload containing expected keys
+        assert called['count'] >= 1 and isinstance(called['payload'], dict)
+        for key in ['strategy', 'processed_rows', 'elapsed_s', 'time_budget_s', 'early_exit']:
+            assert key in called['payload']
     
     def test_multi_process_comparison(self, process_dict_with_groups):
         """Test comparing multiple physics processes."""
